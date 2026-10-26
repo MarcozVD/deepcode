@@ -78,12 +78,45 @@ Shift+Tab cycles **normal → plan mode → auto-reject → normal** (or use `/p
 | `/model` | Choose the model (saved in `~/.deepcode/config.json`) |
 | `/effort` | Choose the reasoning effort (saved) |
 | `/plan` | Toggle plan mode |
+| `/skills` | List skills (run one with `/name`) |
+| `/mcp` | MCP servers and their status |
 | `/resume` | Resume a session from this folder |
 | `/clear` | Start a new session |
 | `/help` | List commands and keys |
 | `/exit` | Quit |
 
 Start a message with `//` to send a literal leading slash.
+
+## Skills
+
+Skills work like in Claude Code: a folder with a `SKILL.md` (YAML frontmatter `name` and `description`, then instructions). deepcode finds them in:
+
+- this project: `.claude/skills`, `.agents/skills`, `.dsh/skills`
+- your user folder: `~/.claude/skills`, `~/.agents/skills`, `~/.dsh/skills`
+
+So skills you already wrote for Claude Code work unchanged. Type `/` to see them next to the built-in commands, run one with `/name [arguments]` (its `SKILL.md` is loaded into the conversation, with `ARGUMENTS:` when you pass any), and list them all with `/skills`. The agent can also load skills on its own through dsh's `skill` tool. New or edited skills are picked up without restarting.
+
+## MCP servers
+
+MCP servers are configured like Claude Code, in the same JSON shape and scopes:
+
+| Scope | File | Use |
+| --- | --- | --- |
+| `local` (default) | `~/.deepcode/mcp.json`, under this folder | Private to you, this project only |
+| `project` | `.mcp.json` in the project | Shared with the repo (the same file Claude Code reads) |
+| `user` | `~/.deepcode/mcp.json` | Every project |
+
+```sh
+deepcode mcp add github -e GITHUB_TOKEN=${GITHUB_TOKEN} -- npx -y @modelcontextprotocol/server-github
+deepcode mcp add --transport http basics http://127.0.0.1:4747/mcp
+deepcode mcp add -H "Authorization: Bearer ${TOKEN}" --transport http api https://example.com/mcp
+deepcode mcp add-json -s user files '{"command":"node","args":["server.js"]}'
+deepcode mcp list
+deepcode mcp get github
+deepcode mcp remove github
+```
+
+`${VAR}` and `${VAR:-default}` are expanded from the environment, as in Claude Code. Transports: stdio and http (SSE is not supported by dsh). Inside a session, `/mcp` shows each server's status and tool count, and MCP tools appear as `server - tool (MCP)`. dsh refuses to start a session when a server fails, so deepcode then starts without MCP and tells you why.
 
 ## Permissions
 

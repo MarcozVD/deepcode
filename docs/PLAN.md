@@ -55,6 +55,11 @@ dsh-acp forwards neither `user-questions/request` nor slash commands, so Q19/Q23
 - Shift+Tab cycle: normal → plan → auto-reject (Q10); plan is skipped without the bridge.
 - `@` mentions: completion from a workspace file index (refreshed after each turn); mentioned files up to 64 KB are inlined into the prompt (dsh-acp advertises no embedded-context support).
 
+## Skills and MCP (added 2026-10-25)
+
+- Skills: dsh's `dsh-skill-filesystem` already scans `<project>/.dsh/skills`, `<project>/.agents/skills`, `~/.dsh/skills`, `~/.agents/skills`; the bridge patch adds Claude Code's `<cwd>/.claude/skills` and `~/.claude/skills` through `customSkillDirs`. The bridge answers `listSkills` (`ctx.skills.list`) and `getSkill` (`ctx.skills.get`, rendered in dsh's own `<skill_content>` framing). `/name args` sends that block plus `ARGUMENTS:` as the prompt; user-invocable skills fill the `/` menu (scrolling, built-ins win on name clashes).
+- MCP: dsh-acp mounts ACP `mcpServers` (stdio with an absolute command, or http) into each new/resumed session, with `failOnStartupError: true`. deepcode reads Claude Code's format and scopes (`.mcp.json` project, `~/.deepcode/mcp.json` user + `projects[cwd]` local), expands `${VAR}`, resolves stdio commands on PATH/PATHEXT, and on session failure retries without MCP. `deepcode mcp add|add-json|list|get|remove` mirrors `claude mcp`. `/mcp` counts `mcp__<server>__*` tools via the bridge (`ctx.tools.view(agent)`).
+
 ## dsh internals (reference only, for later bundle work)
 
 - Bundle manifest: `"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}` in `package.json`; ESM plugin exports `name`, `inject`, `Config`, `apply(ctx, config)`.

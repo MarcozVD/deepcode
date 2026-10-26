@@ -8,6 +8,8 @@ export const COMMANDS: SlashCommand[] = [
   { name: 'model', description: 'Choose the model' },
   { name: 'effort', description: 'Choose the reasoning effort' },
   { name: 'plan', description: 'Toggle plan mode (plan first, edit after approval)' },
+  { name: 'skills', description: 'List available skills' },
+  { name: 'mcp', description: 'Show MCP servers and their status' },
   { name: 'resume', description: 'Resume a previous session in this folder' },
   { name: 'clear', description: 'Start a new session' },
   { name: 'exit', description: 'Quit deepcode' },
@@ -16,7 +18,7 @@ export const COMMANDS: SlashCommand[] = [
 export type ParsedInput =
   | { kind: 'prompt'; text: string }
   | { kind: 'command'; name: string; args: string }
-  | { kind: 'unknown'; name: string }
+  | { kind: 'unknown'; name: string; args: string }
 
 /** Lines starting with `/` are local commands; `//` sends a literal slash. */
 export function parseInput(text: string): ParsedInput {
@@ -27,7 +29,7 @@ export function parseInput(text: string): ParsedInput {
   if (COMMANDS.some((command) => command.name === name)) {
     return { kind: 'command', name, args: rest.join(' ') }
   }
-  return { kind: 'unknown', name }
+  return { kind: 'unknown', name, args: rest.join(' ') }
 }
 
 export const HELP_TEXT = [

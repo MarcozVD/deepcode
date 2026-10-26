@@ -2,7 +2,7 @@ import { Box, Static, Text, useInput, useStdout } from 'ink'
 import { useRef, useState } from 'react'
 
 import type { ApprovalMode } from './args.js'
-import { COMMANDS } from './commands.js'
+import { COMMANDS, type SlashCommand } from './commands.js'
 import { type Completion, completionFor } from './completion.js'
 import {
   backspace,
@@ -76,6 +76,8 @@ export interface AppProps {
   permission: PendingPermission | undefined
   picker: Picker | undefined
   question?: PendingQuestion | undefined
+  /** Commands beyond the built-ins, e.g. user-invocable skills. */
+  extraCommands?: SlashCommand[] | undefined
   /** Workspace files for `@` completion. */
   files?: string[] | undefined
   onSubmit: (text: string) => void
@@ -146,7 +148,7 @@ export function EntryView({ entry, maxLines }: { entry: Entry; maxLines?: number
             <Text color={entry.status === 'failed' ? 'red' : 'green'}>
               {`${STATUS_MARK[entry.status] ?? '○'} `}
             </Text>
-            <Text bold>{entry.title}</Text>
+            <Text bold>{displayToolTitle(entry.title)}</Text>
             {entry.detail !== '' ? <Text color="gray">{`(${entry.detail})`}</Text> : null}
           </Text>
           {entry.output !== '' && (entry.diff.length === 0 || entry.status === 'failed') ? (
@@ -338,7 +340,7 @@ export function App(props: AppProps) {
   const completion =
     props.inputLabel !== undefined || (menuCurrent && menu.dismissed)
       ? undefined
-      : completionFor(editor, COMMANDS, props.files)
+      : completionFor(editor, [...COMMANDS, ...(props.extraCommands ?? [])], props.files)
   const menuIndex =
     completion === undefined
       ? 0
@@ -638,6 +640,8 @@ type StaticItem =
   | { type: 'header'; key: string; info: HeaderInfo }
   | { type: 'entry'; key: string; entry: Entry }
 
+const MENU_ROWS = 8
+
 export function CompletionMenu({
   completion,
   selected,
@@ -645,22 +649,41 @@ export function CompletionMenu({
   completion: Completion
   selected: number
 }) {
-  const width = Math.max(...completion.items.map((item) => item.label.length)) + 2
+  const items = completion.items
+  // Keep the selection visible in a window of MENU_ROWS rows.
+  const start = Math.min(
+    Math.max(0, selected - MENU_ROWS + 1),
+    Math.max(0, items.length - MENU_ROWS),
+  )
+  const shown = items.slice(start, start + MENU_ROWS)
+  const width = Math.max(...shown.map((item) => item.label.length)) + 2
   return (
     <Box flexDirection="column">
-      {completion.items.map((item, index) => (
-        <Text
-          key={item.label}
-          color={index === selected ? theme.brand : undefined}
-          bold={index === selected}
-          wrap="truncate-end"
-        >
-          {`  ${item.label.padEnd(width)}`}
-          <Text color={index === selected ? theme.accent : theme.muted}>{item.description}</Text>
-        </Text>
-      ))}
+      {shown.map((item, offset) => {
+        const index = start + offset
+        return (
+          <Text
+            key={item.label}
+            color={index === selected ? theme.brand : undefined}
+            bold={index === selected}
+            wrap="truncate-end"
+          >
+            {`  ${item.label.padEnd(width)}`}
+            <Text color={index === selected ? theme.accent : theme.muted}>{item.description}</Text>
+          </Text>
+        )
+      })}
+      {items.length > MENU_ROWS ? (
+        <Text color={theme.muted}>{`  ${selected + 1}/${items.length}`}</Text>
+      ) : null}
     </Box>
   )
+}
+
+/** `mcp__github__create_issue` → `github - create_issue (MCP)`, as Claude Code shows it. */
+export function displayToolTitle(title: string): string {
+  const match = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(title)
+  return match === null ? title : `${match[1]} - ${match[2]} (MCP)`
 }
 
 /** One line under the input: the mode on the left, model and usage on the right. */
@@ -673,9 +696,7 @@ export function Footer(props: {
   running: boolean
   exitArmed: boolean
 }) {
-  let left = (
-    <Text color={theme.muted}>? /help · @ files · shift+tab modes</Text>
-  )
+  let left = <Text color={theme.muted}>? /help · @ files · shift+tab modes</Text>
   if (props.exitArmed) left = <Text color={theme.warning}>Press Ctrl+C again to exit</Text>
   else if (props.planMode) {
     left = (

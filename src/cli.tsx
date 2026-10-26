@@ -17,10 +17,12 @@ import {
   versionWarning,
 } from './acp.js'
 import { type ApprovalMode, type Args, ArgsError, HELP, parseArgs } from './args.js'
-import { type Answer, BridgeServer, type Question } from './bridge.js'
-import { HELP_TEXT, parseInput } from './commands.js'
+import { type Answer, BridgeServer, type Question, type SkillSummary } from './bridge.js'
+import { COMMANDS, HELP_TEXT, parseInput, type SlashCommand } from './commands.js'
 import { type Config, loadConfig, saveConfig } from './config.js'
 import type { HeaderInfo } from './header.js'
+import { type ConfiguredServer, describeServer, loadServers, toAcpServers } from './mcp.js'
+import { McpCliError, runMcpCli } from './mcpCli.js'
 import { expandMentions, listFiles } from './mentions.js'
 import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX } from './permissions.js'
 import { ensureProfile, PROFILE_NAME } from './profile.js'
@@ -165,6 +167,65 @@ function isConnected(server: BridgeServer | undefined): boolean {
   return server?.connected === true
 }
 
+/** User-invocable skills as slash commands; built-in commands win on a name clash. */
+function skillCommands(skills: SkillSummary[]): SlashCommand[] {
+  const builtIn = new Set(COMMANDS.map((command) => command.name))
+  return skills
+    .filter((skill) => !builtIn.has(skill.name))
+    .map((skill) => ({
+      name: skill.name,
+      description: `${firstSentence(skill.description)} (skill)`,
+    }))
+}
+
+function firstSentence(text: string, max = 70): string {
+  const line = text.split(/\r?\n/)[0] ?? ''
+  const sentence = line.split(/(?<=[.!?])\s/)[0] ?? line
+  return sentence.length > max ? `${sentence.slice(0, max - 1)}…` : sentence
+}
+
+function skillsReport(skills: SkillSummary[], bridged: boolean): string {
+  if (!bridged) return 'Skills need the deepcode dsh profile; this session runs without the bridge.'
+  if (skills.length === 0) {
+    return 'No skills found. Add one as <name>/SKILL.md in .claude/skills, .agents/skills or .dsh/skills (this project), or ~/.claude/skills, ~/.agents/skills, ~/.dsh/skills.'
+  }
+  const lines = skills.map(
+    (skill) =>
+      `  /${skill.name}  ${firstSentence(skill.description)}${skill.source ? `  · ${skill.source}` : ''}`,
+  )
+  return [`Skills (${skills.length}) — type /name to run one:`, ...lines].join('\n')
+}
+
+async function mcpReport(
+  mcp: { configured: ConfiguredServer[]; skipped: ConfiguredServer[] },
+  failure: string | undefined,
+  client: DshAcpClient,
+  server: BridgeServer | undefined,
+): Promise<string> {
+  if (mcp.configured.length === 0) {
+    return 'No MCP servers configured. Add one with `deepcode mcp add <name> -- <command>` or `deepcode mcp add --transport http <name> <url>` (or edit .mcp.json).'
+  }
+  const tools =
+    server !== undefined && client.sessionId !== undefined
+      ? await server.listTools(client.sessionId)
+      : []
+  const mounted = new Set(client.mcpServers.map((entry) => entry.name))
+  const lines = mcp.configured.map((entry) => {
+    const skipped = mcp.skipped.find((candidate) => candidate.name === entry.name)
+    let status: string
+    if (skipped !== undefined) status = `✗ ${skipped.error ?? 'not started'}`
+    else if (!mounted.has(entry.name)) status = `✗ failed to start${failure ? `: ${failure}` : ''}`
+    else {
+      const count = tools.filter((tool) => tool.startsWith(`mcp__${entry.name}__`)).length
+      status = server === undefined ? '✓ connected' : `✓ connected · ${count} tools`
+    }
+    return `  ${entry.name} (${entry.scope})  ${describeServer(entry.config)}\n    ${status}`
+  })
+  return ['MCP servers:', ...lines, '', 'Manage with: deepcode mcp add | list | get | remove'].join(
+    '\n',
+  )
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -173,6 +234,7 @@ function Root({
   client,
   hooks,
   server,
+  mcp,
   args,
   initialConfig,
   cwd,
@@ -182,6 +244,8 @@ function Root({
   hooks: Hooks
   /** The bridge pipe, when the deepcode profile is in use. */
   server: BridgeServer | undefined
+  /** MCP servers from .mcp.json / ~/.deepcode/mcp.json, and the ones left out. */
+  mcp: { configured: ConfiguredServer[]; skipped: ConfiguredServer[] }
   args: Args
   initialConfig: Config
   cwd: string
@@ -195,6 +259,8 @@ function Root({
   const [question, setQuestion] = useState<ActiveQuestion | undefined>()
   const [askingCustom, setAskingCustom] = useState(false)
   const [files, setFiles] = useState<string[]>([])
+  const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [mcpFailure, setMcpFailure] = useState<string | undefined>()
   const [transcript, setTranscriptState] = useState<Transcript>(emptyTranscript)
   const [running, setRunning] = useState(false)
   const [model, setModel] = useState<string | undefined>()
@@ -260,10 +326,39 @@ function Root({
     })
   }
 
+  /** Skills dsh sees for this folder, for the / menu (dsh watches the skill folders). */
+  const refreshSkills = useCallback((): void => {
+    if (server === undefined || !server.connected) return
+    server
+      .listSkills(cwd, client.sessionId)
+      .then((list) => setSkills(list.filter((skill) => skill.userInvocable)))
+      .catch(() => {})
+  }, [server, cwd, client])
+
+  /**
+   * Open a session. dsh mounts ACP MCP servers with failOnStartupError, so one
+   * broken server fails the whole session: retry without MCP and say why.
+   */
+  const openSession = useCallback(
+    async (open: () => Promise<unknown>): Promise<void> => {
+      try {
+        await open()
+      } catch (error) {
+        if (client.mcpServers.length === 0) throw error
+        const reason = describeError(error)
+        client.mcpServers = []
+        await open()
+        setMcpFailure(reason)
+        say(`MCP servers failed to start (${reason}). Continuing without MCP; see /mcp.`, 'error')
+      }
+    },
+    [client, say],
+  )
+
   /** Resume a session and replay its recent history from dsh's log. */
   const resume = useCallback(
     async (id: string): Promise<void> => {
-      await client.resumeSession(id)
+      await openSession(() => client.resumeSession(id))
       await applyModel()
       allowed.current.clear()
       const stored = await readStoredSession(id)
@@ -287,7 +382,7 @@ function Root({
       setPlanMode(false)
       server?.requestPlanState(id)
     },
-    [client, applyModel, setTranscript, server],
+    [client, applyModel, setTranscript, server, openSession],
   )
 
   const showSessions = useCallback(async (): Promise<void> => {
@@ -397,10 +492,14 @@ function Root({
         if (args.resume !== undefined && args.resume !== '') {
           await resume(args.resume)
         } else {
-          await client.newSession()
+          await openSession(() => client.newSession())
           await applyModel()
         }
         setHeader(headerInfo(client, cwd, initialConfig, isConnected(server)))
+        for (const entry of mcp.skipped) {
+          say(`MCP server ${entry.name} not started: ${entry.error ?? 'invalid'}`, 'error')
+        }
+        refreshSkills()
         if (args.resume === '') await showSessions()
       } catch (error) {
         setHeader(headerInfo(client, cwd, initialConfig, false))
@@ -425,6 +524,9 @@ function Root({
     showSessions,
     setTranscript,
     resume,
+    mcp,
+    refreshSkills,
+    openSession,
   ])
 
   const switchPlan = (active: boolean): void => {
@@ -495,8 +597,7 @@ function Root({
         onExit(0)
         return
       case 'clear':
-        void client
-          .newSession()
+        void openSession(() => client.newSession())
           .then(applyModel)
           .then(() => {
             allowed.current.clear()
@@ -517,7 +618,28 @@ function Root({
       case 'plan':
         switchPlan(!planMode)
         return
+      case 'skills':
+        say(skillsReport(skills, server !== undefined))
+        return
+      case 'mcp':
+        void mcpReport(mcp, mcpFailure, client, server).then((report) => say(report))
+        return
     }
+  }
+
+  /** `/name args` for a skill: load SKILL.md through dsh and send it as the prompt. */
+  const invokeSkill = (skill: SkillSummary, args: string): void => {
+    if (server === undefined) return
+    const shown = `/${skill.name}${args === '' ? '' : ` ${args}`}`
+    void server
+      .getSkill(skill.name, cwd, client.sessionId)
+      .then((content) => {
+        const prompt = args === '' ? content : `${content}\n\nARGUMENTS: ${args}`
+        sendPrompt(shown, prompt)
+      })
+      .catch((error: unknown) =>
+        say(`Could not load skill ${skill.name}: ${describeError(error)}`, 'error'),
+      )
   }
 
   const submit = (text: string): void => {
@@ -527,13 +649,16 @@ function Root({
       return
     }
     if (parsed.kind === 'unknown') {
-      say(`Unknown command /${parsed.name}. Type /help.`, 'error')
+      const skill = skills.find((candidate) => candidate.name === parsed.name)
+      if (skill !== undefined) invokeSkill(skill, parsed.args)
+      else say(`Unknown command /${parsed.name}. Type /help.`, 'error')
       return
     }
     sendPrompt(parsed.text)
   }
 
-  const sendPrompt = (text: string): void => {
+  /** Show `text` as the user's message and send `prompt` (default: the same text). */
+  const sendPrompt = (text: string, prompt?: string): void => {
     setTranscript((state) => {
       // A finished task list has done its job; drop it when new work starts.
       const done =
@@ -541,7 +666,7 @@ function Root({
       return addEntry(done ? { ...state, todos: [] } : state, { kind: 'user', text })
     })
     setRunning(true)
-    expandMentions(text, cwd)
+    expandMentions(prompt ?? text, cwd)
       .then(({ prompt, attached }) => {
         if (attached.length > 0) say(`Attached ${attached.join(', ')}`)
         return client.prompt(prompt)
@@ -553,8 +678,9 @@ function Root({
       .catch((error: unknown) => say(describeError(error), 'error'))
       .finally(() => {
         setRunning(false)
-        // The agent may have created or removed files: refresh @ completion.
+        // The agent may have created or removed files or skills: refresh completion.
         void listFiles(cwd).then(setFiles)
+        refreshSkills()
         // A rejection reason typed during the turn goes out as the next prompt.
         const reason = pendingReason.current
         pendingReason.current = undefined
@@ -605,6 +731,7 @@ function Root({
       picker={picker?.view}
       question={question === undefined ? undefined : questionView(question)}
       files={files}
+      extraCommands={skillCommands(skills)}
       onQuestion={answerQuestion}
       onSubmit={askingCustom ? submitCustom : askingReason ? submitReason : submit}
       inputLabel={
@@ -637,9 +764,24 @@ function Root({
 }
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2)
+  if (argv[0] === 'mcp') {
+    try {
+      await runMcpCli(argv.slice(1), {
+        cwd: process.cwd(),
+        out: (text) => process.stdout.write(text),
+      })
+    } catch (error) {
+      if (!(error instanceof McpCliError)) throw error
+      process.stderr.write(`deepcode mcp: ${error.message}\n`)
+      process.exitCode = 1
+    }
+    return
+  }
+
   let args: Args
   try {
-    args = parseArgs(process.argv.slice(2))
+    args = parseArgs(argv)
   } catch (error) {
     if (!(error instanceof ArgsError)) throw error
     process.stderr.write(`deepcode: ${error.message}\n\n${HELP}`)
@@ -705,6 +847,14 @@ async function main(): Promise<void> {
     env: server === undefined ? undefined : { DEEPCODE_BRIDGE: server.path },
     onPermission: (request) => hooks.permission(request),
   })
+  let configured: ConfiguredServer[] = []
+  try {
+    configured = await loadServers(cwd)
+  } catch (error) {
+    process.stderr.write(`deepcode: ignoring MCP config: ${describeError(error)}\n`)
+  }
+  const { acp, skipped } = toAcpServers(configured, cwd)
+  client.mcpServers = acp
 
   let exiting = false
   const exit = (code: number): void => {
@@ -724,6 +874,7 @@ async function main(): Promise<void> {
       client={client}
       hooks={hooks}
       server={server}
+      mcp={{ configured, skipped }}
       args={args}
       initialConfig={config}
       cwd={cwd}

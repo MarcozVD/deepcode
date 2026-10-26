@@ -37,7 +37,7 @@ describe('parseInput', () => {
   it('separates prompts, commands and unknown commands', () => {
     expect(parseInput('hello')).toEqual({ kind: 'prompt', text: 'hello' })
     expect(parseInput('/Model')).toEqual({ kind: 'command', name: 'model', args: '' })
-    expect(parseInput('/nope now')).toEqual({ kind: 'unknown', name: 'nope' })
+    expect(parseInput('/nope now')).toEqual({ kind: 'unknown', name: 'nope', args: 'now' })
     expect(parseInput('//etc is a path')).toEqual({ kind: 'prompt', text: '/etc is a path' })
   })
 })

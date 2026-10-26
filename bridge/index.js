@@ -10,6 +10,9 @@
 //                  {type:'cancel', id}
 //                  {type:'setPlan', requestId, sessionId, active}
 //                  {type:'getPlan', sessionId}   (answered with a 'plan' message)
+//                  {type:'listSkills', requestId, cwd, sessionId?} -> {type:'skills', requestId, skills}
+//                  {type:'getSkill', requestId, name, cwd, sessionId?} -> {type:'skill', requestId, content}
+//                  {type:'listTools', requestId, sessionId} -> {type:'tools', requestId, tools}
 import net from 'node:net'
 
 export const name = 'deepcode-bridge'
@@ -27,6 +30,34 @@ function questionError(message, code) {
   error.name = 'UserQuestionError'
   error.code = code
   return error
+}
+
+const escapeAttr = (value) =>
+  String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
+
+/** A loaded skill in dsh's own `<skill_content>` framing (as the `skill` tool renders it). */
+function renderSkill(skill) {
+  const base = skill.resourceBase
+  const hint =
+    base?.kind === 'directory'
+      ? [
+          `Base directory for this skill: ${base.path}`,
+          'Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.',
+        ]
+      : base?.kind === 'url'
+        ? [`Base URL for this skill: ${base.url}`, 'Load referenced resources only as needed.']
+        : ['Load referenced resources only as needed.']
+  return [
+    `<skill_content name="${escapeAttr(skill.name)}">`,
+    '<skill_resources>',
+    ...hint,
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    skill.content,
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
 }
 
 /** Session id of an agent, across dsh session shapes. */
@@ -105,8 +136,64 @@ export function apply(ctx) {
       if (agent === undefined || planMode === undefined) return
       const state = planMode.get(agent)
       send({ type: 'plan', sessionId: message.sessionId, active: state.pending ?? state.active })
+    } else if (message.type === 'listSkills') {
+      void listSkills(message)
+    } else if (message.type === 'getSkill') {
+      void getSkill(message)
+    } else if (message.type === 'listTools') {
+      listTools(message)
     }
   }
+
+  /** Reply to a request; failures become `{ error }` so the TUI never hangs. */
+  const answer = async (message, type, work) => {
+    try {
+      send({ type, requestId: message.requestId, ...(await work()) })
+    } catch (error) {
+      send({
+        type,
+        requestId: message.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const skillScope = (message) => {
+    const agent = message.sessionId === undefined ? undefined : ctx.agents.get(message.sessionId)
+    return { cwd: message.cwd, ...(agent === undefined ? {} : { scope: agent }) }
+  }
+
+  const listSkills = (message) =>
+    answer(message, 'skills', async () => {
+      const skills = ctx.get('skills')
+      if (skills === undefined) return { skills: [] }
+      const summaries = await skills.list(skillScope(message))
+      return {
+        skills: summaries.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          userInvocable: skill.invocation?.userInvocable !== false,
+          source: skill.source,
+          path: skill.path,
+        })),
+      }
+    })
+
+  const getSkill = (message) =>
+    answer(message, 'skill', async () => {
+      const skills = ctx.get('skills')
+      const skill = await skills?.get(message.name, skillScope(message))
+      if (skill === undefined) throw new Error(`no skill named ${message.name}`)
+      return { name: skill.name, content: renderSkill(skill) }
+    })
+
+  const listTools = (message) =>
+    answer(message, 'tools', async () => {
+      const agent = ctx.agents.get(message.sessionId)
+      const tools = ctx.get('tools')
+      if (agent === undefined || typeof tools?.view !== 'function') return { tools: [] }
+      return { tools: [...tools.view(agent).visible.keys()] }
+    })
 
   socket.on('connect', () => {
     connected = true

@@ -16,6 +16,8 @@ export interface Completion {
 }
 
 const MAX_ITEMS = 8
+/** Command menus scroll, so they can hold every command and skill. */
+const MAX_COMMANDS = 200
 
 export function completionFor(
   editor: EditorState,
@@ -25,7 +27,9 @@ export function completionFor(
   // `/name` as the whole input so far (no arguments yet).
   if (/^\/[\w-]*$/.test(editor.text) && editor.cursor === editor.text.length) {
     const query = editor.text.slice(1).toLowerCase()
-    const matches = commands.filter((command) => command.name.startsWith(query))
+    const matches = commands
+      .filter((command) => command.name.startsWith(query))
+      .slice(0, MAX_COMMANDS)
     if (matches.length === 0) return undefined
     return {
       kind: 'command',

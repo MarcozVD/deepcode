@@ -51,14 +51,28 @@ interface Incoming {
   outcome?: PlanOutcome
   error?: string
   questions?: Question[]
+  skills?: SkillSummary[]
+  content?: string
+  tools?: string[]
 }
+
+export interface SkillSummary {
+  name: string
+  description: string
+  userInvocable: boolean
+  source?: string
+  path?: string
+}
+
+/** Replies that answer a `requestId`. */
+const REPLY_TYPES = new Set(['planResult', 'skills', 'skill', 'tools'])
 
 export class BridgeServer {
   readonly path = pipePath()
   private server: net.Server | undefined
   private socket: net.Socket | undefined
   private readonly aborts = new Map<number, AbortController>()
-  private readonly planRequests = new Map<number, (outcome: PlanOutcome) => void>()
+  private readonly requests = new Map<number, (reply: Incoming | undefined) => void>()
   private nextRequest = 1
   private connectedListeners = new Set<() => void>()
 
@@ -107,8 +121,8 @@ export class BridgeServer {
       if (this.socket === socket) this.socket = undefined
       for (const controller of this.aborts.values()) controller.abort()
       this.aborts.clear()
-      for (const resolve of this.planRequests.values()) resolve('error')
-      this.planRequests.clear()
+      for (const resolve of this.requests.values()) resolve(undefined)
+      this.requests.clear()
     })
     socket.on('error', () => {})
   }
@@ -118,6 +132,12 @@ export class BridgeServer {
   }
 
   private handle(message: Incoming): void {
+    if (message.type !== undefined && REPLY_TYPES.has(message.type)) {
+      const resolve = this.requests.get(message.requestId ?? -1)
+      this.requests.delete(message.requestId ?? -1)
+      resolve?.(message)
+      return
+    }
     switch (message.type) {
       case 'hello':
         for (const listener of this.connectedListeners) listener()
@@ -152,24 +172,44 @@ export class BridgeServer {
           this.handlers.onPlan(message.sessionId, message.active === true)
         }
         return
-      case 'planResult': {
-        const resolve = this.planRequests.get(message.requestId ?? -1)
-        if (resolve === undefined) return
-        this.planRequests.delete(message.requestId ?? -1)
-        resolve(message.outcome ?? 'error')
-        return
-      }
     }
   }
 
-  setPlan(sessionId: string, active: boolean): Promise<PlanOutcome> {
-    if (!this.connected) return Promise.resolve('error')
+  /** Send a request and wait for its reply; undefined when disconnected. */
+  private request(message: object): Promise<Incoming | undefined> {
+    if (!this.connected) return Promise.resolve(undefined)
     const requestId = this.nextRequest
     this.nextRequest += 1
     return new Promise((resolve) => {
-      this.planRequests.set(requestId, resolve)
-      this.send({ type: 'setPlan', requestId, sessionId, active })
+      this.requests.set(requestId, resolve)
+      this.send({ ...message, requestId })
     })
+  }
+
+  async setPlan(sessionId: string, active: boolean): Promise<PlanOutcome> {
+    const reply = await this.request({ type: 'setPlan', sessionId, active })
+    return reply?.outcome ?? 'error'
+  }
+
+  /** Skills dsh discovers for this folder (including ~/.claude/skills via the bridge patch). */
+  async listSkills(cwd: string, sessionId?: string): Promise<SkillSummary[]> {
+    const reply = await this.request({ type: 'listSkills', cwd, sessionId })
+    if (reply?.error !== undefined) throw new Error(reply.error)
+    return reply?.skills ?? []
+  }
+
+  /** A skill rendered as dsh's `<skill_content>` block, ready to put in a prompt. */
+  async getSkill(name: string, cwd: string, sessionId?: string): Promise<string> {
+    const reply = await this.request({ type: 'getSkill', name, cwd, sessionId })
+    if (reply === undefined) throw new Error('the dsh bridge is not connected')
+    if (reply.error !== undefined) throw new Error(reply.error)
+    return reply.content ?? ''
+  }
+
+  /** Tool names the session's agent can call (MCP tools are `mcp__<server>__<tool>`). */
+  async listTools(sessionId: string): Promise<string[]> {
+    const reply = await this.request({ type: 'listTools', sessionId })
+    return reply?.tools ?? []
   }
 
   /** Ask for the session's plan state; the answer arrives through `onPlan`. */

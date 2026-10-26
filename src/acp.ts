@@ -6,6 +6,7 @@ import { Readable, Writable } from 'node:stream'
 import {
   type Client,
   ClientSideConnection,
+  type McpServer,
   ndJsonStream,
   PROTOCOL_VERSION,
   type RequestPermissionRequest,
@@ -149,6 +150,8 @@ export class DshAcpClient {
   private readonly exitListeners = new Set<(message: string) => void>()
   sessionId: string | undefined
   sandbox: SandboxMode
+  /** MCP servers mounted into every new or resumed session. */
+  mcpServers: McpServer[] = []
   configOptions: SessionConfigOption[] = []
   agentVersion: string | undefined
 
@@ -233,7 +236,10 @@ export class DshAcpClient {
   }
 
   async newSession(): Promise<string> {
-    const response = await this.conn.newSession({ cwd: this.options.cwd, mcpServers: [] })
+    const response = await this.conn.newSession({
+      cwd: this.options.cwd,
+      mcpServers: this.mcpServers,
+    })
     this.sessionId = response.sessionId
     this.configOptions = response.configOptions ?? []
     return response.sessionId
@@ -243,7 +249,7 @@ export class DshAcpClient {
     const response = await this.conn.resumeSession({
       sessionId,
       cwd: this.options.cwd,
-      mcpServers: [],
+      mcpServers: this.mcpServers,
     })
     this.sessionId = sessionId
     this.configOptions = response.configOptions ?? []

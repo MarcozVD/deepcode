@@ -6,6 +6,13 @@
 # questions and plan-mode switches to the deepcode TUI over a local pipe
 # (DEEPCODE_BRIDGE). Without that variable the plugin stays inert.
 
+# Also scan Claude Code's skill folders, so skills written for Claude Code
+# (~/.claude/skills, <project>/.claude/skills) work unchanged. dsh still scans
+# its own .dsh/skills and .agents/skills roots.
+- id: skill-filesystem
+  config:
+    customSkillDirs: !!js "[process.cwd() + '/.claude/skills', (process.env.USERPROFILE || process.env.HOME || '') + '/.claude/skills']"
+
 - insert:
     - id: tool-ask-user
       name: "@deepseek-ai/dsh-tool-ask-user"

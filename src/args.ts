@@ -51,6 +51,7 @@ export function parseArgs(argv: readonly string[]): Args {
 export const HELP = `deepcode — terminal UI for DeepSeek Harness
 
 Usage: deepcode [options]
+       deepcode mcp <add|add-json|list|get|remove>   Manage MCP servers (deepcode mcp --help)
 
 Options:
   -r, --resume [id]           Resume a session (pick from a list without an id)
