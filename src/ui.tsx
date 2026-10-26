@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 
 import type { ApprovalMode } from './args.js'
 import { COMMANDS } from './commands.js'
+import { type Completion, completionFor } from './completion.js'
 import {
   backspace,
   cursorParts,
@@ -20,8 +21,9 @@ import {
   wordLeft,
   wordRight,
 } from './editor.js'
+import { Header, type HeaderInfo } from './header.js'
 import { Markdown } from './markdown.js'
-import { applyMention, currentMention, matchFiles } from './mentions.js'
+import { theme } from './theme.js'
 import { type Entry, settledCount, type Transcript } from './transcript.js'
 
 export interface PermissionChoice {
@@ -84,6 +86,10 @@ export interface AppProps {
   /** Shift+Tab: advance the mode cycle. */
   onToggleApproval: () => void
   onExit: () => void
+  /** Printed once at the top of the session; nothing is printed before it. */
+  header?: HeaderInfo | undefined
+  /** Gray example text in an empty input. */
+  placeholder?: string | undefined
   /** Shown above the input when it collects something other than a prompt. */
   inputLabel?: string | undefined
   /** Esc while `inputLabel` is shown. */
@@ -167,7 +173,11 @@ function SelectList({ items, selected }: { items: PermissionChoice[]; selected: 
   return (
     <>
       {items.map((item, index) => (
-        <Text key={item.id} color={index === selected ? 'cyan' : undefined} wrap="truncate-end">
+        <Text
+          key={item.id}
+          color={index === selected ? theme.brand : undefined}
+          wrap="truncate-end"
+        >
           {`${index === selected ? '❯' : ' '} ${index + 1}. ${item.label}`}
         </Text>
       ))}
@@ -209,7 +219,7 @@ export function QuestionBox({
   return (
     <Box
       borderStyle="round"
-      borderColor="magenta"
+      borderColor={theme.accent}
       flexDirection="column"
       paddingX={1}
       marginTop={1}
@@ -225,7 +235,7 @@ export function QuestionBox({
         return (
           <Text
             key={item.label}
-            color={index === selected ? 'cyan' : undefined}
+            color={index === selected ? theme.brand : undefined}
             wrap="truncate-end"
           >
             {`${index === selected ? '❯' : ' '} ${index + 1}. ${box}${item.label}`}
@@ -256,7 +266,7 @@ export function TodoList({ todos }: { todos: Transcript['todos'] }) {
             todo.status === 'completed'
               ? 'gray'
               : todo.status === 'in_progress'
-                ? 'cyan'
+                ? theme.brand
                 : undefined
           }
           strikethrough={todo.status === 'completed'}
@@ -271,40 +281,17 @@ export function TodoList({ todos }: { todos: Transcript['todos'] }) {
 
 export function PickerBox({ picker, selected }: { picker: Picker; selected: number }) {
   return (
-    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
+    <Box
+      borderStyle="round"
+      borderColor={theme.brand}
+      flexDirection="column"
+      paddingX={1}
+      marginTop={1}
+    >
       <Text bold>{picker.title}</Text>
       {picker.items.length === 0 ? <Text color="gray">Nothing to choose.</Text> : null}
       <SelectList items={picker.items} selected={selected} />
       <Text color="gray">↑/↓ or number to choose · Enter confirm · Esc cancel</Text>
-    </Box>
-  )
-}
-
-export function StatusBar(props: {
-  model: string | undefined
-  transcript: Transcript
-  cwd: string
-  sandbox: string
-  approval: ApprovalMode
-  planMode?: boolean | undefined
-  hint: string | undefined
-}) {
-  const usage = props.transcript.usage
-  const tokens =
-    usage !== undefined
-      ? `${Math.round(usage.used / 1000)}k/${Math.round(usage.size / 1000)}k tokens`
-      : undefined
-  const mode = props.approval === 'auto-reject' ? `${props.sandbox} · auto-reject` : props.sandbox
-  const parts = [props.model ?? 'connecting…', tokens, mode, props.cwd].filter(
-    (part) => part !== undefined,
-  )
-  return (
-    <Box flexDirection="column">
-      <Text color="gray" wrap="truncate-start">
-        {props.planMode ? <Text color="cyan">⏸ plan mode · </Text> : null}
-        {parts.join(' · ')}
-      </Text>
-      {props.hint !== undefined ? <Text color="yellow">{props.hint}</Text> : null}
     </Box>
   )
 }
@@ -341,9 +328,21 @@ export function App(props: AppProps) {
   const clearInput = (): void => setEditor(emptyEditor)
   const [selected, setSelected] = useState(0)
   const [checked, setChecked] = useState<ReadonlySet<number>>(new Set())
-  const mention = props.files === undefined ? undefined : currentMention(editor)
-  const mentionMatches =
-    mention === undefined || props.files === undefined ? [] : matchFiles(props.files, mention.query)
+  // Completion menu for `/` and `@`; its selection resets whenever the text changes.
+  const [menu, setMenu] = useState<{ text: string; index: number; dismissed: boolean }>({
+    text: '',
+    index: 0,
+    dismissed: false,
+  })
+  const menuCurrent = menu.text === input
+  const completion =
+    props.inputLabel !== undefined || (menuCurrent && menu.dismissed)
+      ? undefined
+      : completionFor(editor, COMMANDS, props.files)
+  const menuIndex =
+    completion === undefined
+      ? 0
+      : Math.min(menuCurrent ? menu.index : 0, completion.items.length - 1)
   const [exitArmed, setExitArmed] = useState(false)
   // A ref, not state: two quick Ctrl+C presses can arrive before a re-render.
   const exitArmedRef = useRef(false)
@@ -421,10 +420,31 @@ export function App(props: AppProps) {
       props.onToggleApproval()
       return
     }
-    if (key.tab && mentionMatches.length > 0) {
-      const file = mentionMatches[0]
-      if (file !== undefined) setEditor((state) => applyMention(state, file))
-      return
+    if (completion !== undefined) {
+      const count = completion.items.length
+      if (key.upArrow || key.downArrow) {
+        const index = (menuIndex + (key.upArrow ? count - 1 : 1)) % count
+        setMenu({ text: input, index, dismissed: false })
+        return
+      }
+      if (key.escape) {
+        setMenu({ text: input, index: 0, dismissed: true })
+        return
+      }
+      if (key.tab || key.return) {
+        const next = completion.accept(menuIndex)
+        // Enter on a command runs it right away, like Claude Code.
+        if (key.return && completion.kind === 'command' && !running) {
+          const text = next.text.trim()
+          history.current.unshift(text)
+          historyIndex.current = -1
+          clearInput()
+          props.onSubmit(text)
+          return
+        }
+        setEditor(completion.kind === 'command' ? insert(next, ' ') : next)
+        return
+      }
     }
     const collecting = props.inputLabel !== undefined
     if (key.escape) {
@@ -520,34 +540,46 @@ export function App(props: AppProps) {
 
   const caret = cursorParts(editor)
 
-  const settled = settledCount(transcript.entries, running)
+  // Before the header is ready nothing is printed permanently, so the
+  // header is always the first thing in scrollback.
+  const settled = props.header === undefined ? 0 : settledCount(transcript.entries, running)
   const live = transcript.entries.slice(settled)
   // Ink redraws the live area in place; if it is taller than the terminal the
   // overflow is duplicated in scrollback, so cap live text to what fits.
   const { stdout } = useStdout()
   const rows = (stdout as { rows?: number }).rows
   const liveLines = Math.max(4, (rows || 24) - 12)
-  let hint: string | undefined
-  if (exitArmed) hint = 'Press Ctrl+C again to exit'
-  else if (running) hint = 'Esc to interrupt'
-
-  const suggestions =
-    input.startsWith('/') && !input.includes(' ')
-      ? COMMANDS.filter((command) => command.name.startsWith(input.slice(1).toLowerCase()))
-      : []
+  const staticItems: StaticItem[] =
+    props.header === undefined
+      ? []
+      : [
+          { type: 'header', key: 'header', info: props.header },
+          ...transcript.entries
+            .slice(0, settled)
+            .map((entry) => ({ type: 'entry' as const, key: `e${entry.id}`, entry })),
+        ]
 
   return (
     <Box flexDirection="column">
-      <Static items={transcript.entries.slice(0, settled)}>
-        {(entry) => <EntryView key={entry.id} entry={entry} />}
+      <Static items={staticItems}>
+        {(item) =>
+          item.type === 'header' ? (
+            <Header key={item.key} info={item.info} />
+          ) : (
+            <EntryView key={item.key} entry={item.entry} />
+          )
+        }
       </Static>
+      {props.header === undefined ? (
+        <Text color={theme.muted}>Connecting to DeepSeek Harness…</Text>
+      ) : null}
       {live.map((entry) => (
         <EntryView key={entry.id} entry={entry} maxLines={liveLines} />
       ))}
       <TodoList todos={transcript.todos} />
       {running && permission === undefined && question === undefined ? (
         <Box marginTop={1}>
-          <Text color="cyan">✻ Working…</Text>
+          <Text color={theme.accent}>✻ Working…</Text>
         </Box>
       ) : null}
       {question !== undefined && permission === undefined ? (
@@ -561,41 +593,123 @@ export function App(props: AppProps) {
       ) : null}
       {props.inputLabel !== undefined ? (
         <Box marginTop={1}>
-          <Text color="yellow">{props.inputLabel}</Text>
+          <Text color={theme.warning}>{props.inputLabel}</Text>
         </Box>
       ) : null}
       <Box
-        borderStyle="round"
-        borderColor={props.inputLabel !== undefined ? 'yellow' : 'gray'}
-        paddingX={1}
+        borderStyle="single"
+        borderLeft={false}
+        borderRight={false}
+        borderColor={props.inputLabel !== undefined ? theme.warning : theme.muted}
         marginTop={props.inputLabel !== undefined ? 0 : 1}
       >
-        <Text color="gray">{'> '}</Text>
-        <Text>
-          {caret.before}
-          <Text inverse>{caret.at}</Text>
-          {caret.after}
+        <Text>{'> '}</Text>
+        {input === '' ? (
+          <Text>
+            <Text inverse>{(props.placeholder ?? ' ').slice(0, 1)}</Text>
+            <Text color={theme.muted}>{(props.placeholder ?? ' ').slice(1)}</Text>
+          </Text>
+        ) : (
+          <Text>
+            {caret.before}
+            <Text inverse>{caret.at}</Text>
+            {caret.after}
+          </Text>
+        )}
+      </Box>
+      {completion !== undefined ? (
+        <CompletionMenu completion={completion} selected={menuIndex} />
+      ) : (
+        <Footer
+          model={props.model}
+          transcript={transcript}
+          sandbox={props.sandbox}
+          approval={props.approval}
+          planMode={props.planMode === true}
+          running={running}
+          exitArmed={exitArmed}
+        />
+      )}
+    </Box>
+  )
+}
+
+type StaticItem =
+  | { type: 'header'; key: string; info: HeaderInfo }
+  | { type: 'entry'; key: string; entry: Entry }
+
+export function CompletionMenu({
+  completion,
+  selected,
+}: {
+  completion: Completion
+  selected: number
+}) {
+  const width = Math.max(...completion.items.map((item) => item.label.length)) + 2
+  return (
+    <Box flexDirection="column">
+      {completion.items.map((item, index) => (
+        <Text
+          key={item.label}
+          color={index === selected ? theme.brand : undefined}
+          bold={index === selected}
+          wrap="truncate-end"
+        >
+          {`  ${item.label.padEnd(width)}`}
+          <Text color={index === selected ? theme.accent : theme.muted}>{item.description}</Text>
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+/** One line under the input: the mode on the left, model and usage on the right. */
+export function Footer(props: {
+  model: string | undefined
+  transcript: Transcript
+  sandbox: string
+  approval: ApprovalMode
+  planMode: boolean
+  running: boolean
+  exitArmed: boolean
+}) {
+  let left = (
+    <Text color={theme.muted}>? /help · @ files · shift+tab modes</Text>
+  )
+  if (props.exitArmed) left = <Text color={theme.warning}>Press Ctrl+C again to exit</Text>
+  else if (props.planMode) {
+    left = (
+      <Text>
+        <Text color={theme.plan}>⏸ plan mode on</Text>
+        <Text color={theme.muted}> (shift+tab to cycle)</Text>
+      </Text>
+    )
+  } else if (props.approval === 'auto-reject') {
+    left = (
+      <Text>
+        <Text color={theme.autoReject}>⏵⏵ auto-reject on</Text>
+        <Text color={theme.muted}> (shift+tab to cycle)</Text>
+      </Text>
+    )
+  } else if (props.running) left = <Text color={theme.muted}>esc to interrupt</Text>
+  const usage = props.transcript.usage
+  const tokens =
+    usage !== undefined
+      ? `${Math.round(usage.used / 1000)}k/${Math.round(usage.size / 1000)}k tokens`
+      : undefined
+  const right = [props.model ?? 'connecting…', tokens, props.sandbox]
+    .filter((part) => part !== undefined)
+    .join(' · ')
+  return (
+    <Box justifyContent="space-between">
+      <Box flexShrink={0} paddingLeft={2}>
+        {left}
+      </Box>
+      <Box flexShrink={1} paddingLeft={2}>
+        <Text color={theme.muted} wrap="truncate-start">
+          {right}
         </Text>
       </Box>
-      {suggestions.map((command) => (
-        <Text key={command.name} color="gray">
-          {`  /${command.name.padEnd(8)} ${command.description}`}
-        </Text>
-      ))}
-      {mentionMatches.map((file, index) => (
-        <Text key={file} color={index === 0 ? 'cyan' : 'gray'} wrap="truncate-start">
-          {`  @${file}${index === 0 ? '  (Tab)' : ''}`}
-        </Text>
-      ))}
-      <StatusBar
-        model={props.model}
-        transcript={transcript}
-        cwd={props.cwd}
-        sandbox={props.sandbox}
-        approval={props.approval}
-        planMode={props.planMode}
-        hint={hint}
-      />
     </Box>
   )
 }

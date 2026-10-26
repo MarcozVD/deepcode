@@ -52,7 +52,7 @@ describe('App', () => {
     const frame = lastFrame() ?? ''
     expect(frame).toContain('run it')
     expect(frame).toContain('pwsh(echo done)')
-    expect(frame).toContain('DeepSeek-V4.1-Flash · 8k/1000k tokens · workspace-write · C:/work')
+    expect(frame).toContain('DeepSeek-V4.1-Flash · 8k/1000k tokens · workspace-write')
   })
 
   it('submits typed text on Enter and clears the input', async () => {
@@ -95,7 +95,7 @@ describe('App', () => {
   it('cancels a running turn on Esc', async () => {
     const onCancel = vi.fn()
     const { stdin, lastFrame } = render(<App {...props({ running: true, onCancel })} />)
-    expect(lastFrame()).toContain('Esc to interrupt')
+    expect(lastFrame()).toContain('esc to interrupt')
     stdin.write(ESC)
     await tick()
     expect(onCancel).toHaveBeenCalled()
@@ -152,7 +152,7 @@ describe('App', () => {
 
   it('shows the auto-reject mode in the status bar', () => {
     const { lastFrame } = render(<App {...props({ approval: 'auto-reject' })} />)
-    expect(lastFrame()).toContain('workspace-write · auto-reject')
+    expect(lastFrame()).toContain('⏵⏵ auto-reject on')
   })
 
   it('suggests slash commands while typing', async () => {
@@ -270,12 +270,68 @@ describe('App', () => {
     const { stdin, lastFrame } = render(<App {...props({ files, onSubmit })} />)
     stdin.write('see @ui')
     await tick()
-    expect(lastFrame()).toContain('@src/ui.tsx  (Tab)')
+    expect(lastFrame()).toContain('@src/ui.tsx')
     stdin.write('\t')
     await tick()
     stdin.write(ENTER)
     await tick()
     expect(onSubmit).toHaveBeenCalledWith('see @src/ui.tsx')
+  })
+
+  it('prints the header with the whale before anything else', () => {
+    const header = {
+      version: '1.2.3',
+      model: 'DeepSeek-V4.1-Flash with high effort',
+      account: 'DeepSeek account',
+      cwd: 'C:/work',
+      note: 'Using DeepSeek-V4.1-Flash · /model',
+    }
+    const transcript = addEntry(emptyTranscript, { kind: 'system', text: 'hello', tone: 'info' })
+    const frame = render(<App {...props({ header, transcript })} />).lastFrame() ?? ''
+    expect(frame).toContain('deepcode v1.2.3')
+    expect(frame).toContain('DeepSeek-V4.1-Flash with high effort · DeepSeek account')
+    expect(frame).toContain('│ Using DeepSeek-V4.1-Flash · /model')
+    expect(frame).toContain('█')
+    expect(frame.indexOf('deepcode v1.2.3')).toBeLessThan(frame.indexOf('hello'))
+  })
+
+  it('shows a placeholder in the empty input and a connecting line without a header', () => {
+    const frame =
+      render(<App {...props({ placeholder: 'Try "fix typecheck errors"' })} />).lastFrame() ?? ''
+    expect(frame).toContain('Try "fix typecheck errors"')
+    expect(frame).toContain('Connecting to DeepSeek Harness…')
+  })
+
+  it('navigates the slash command menu and runs the choice on Enter', async () => {
+    const onSubmit = vi.fn()
+    const { stdin, lastFrame } = render(<App {...props({ onSubmit })} />)
+    stdin.write('/')
+    await tick()
+    expect(lastFrame()).toContain('/help')
+    expect(lastFrame()).toContain('Choose the model')
+    stdin.write(DOWN)
+    await tick()
+    stdin.write(ENTER)
+    await tick()
+    expect(onSubmit).toHaveBeenCalledWith('/model')
+  })
+
+  it('closes the menu on Esc and completes a command on Tab', async () => {
+    const onSubmit = vi.fn()
+    const { stdin, lastFrame } = render(<App {...props({ onSubmit })} />)
+    stdin.write('/res')
+    await tick()
+    stdin.write('\t')
+    await tick()
+    expect(lastFrame()).toContain('> /resume')
+    expect(onSubmit).not.toHaveBeenCalled()
+    stdin.write('\u0015')
+    await tick()
+    stdin.write('/he')
+    await tick()
+    stdin.write(ESC)
+    await tick()
+    expect(lastFrame()).not.toContain('Show commands and keys')
   })
 
   it('picks from a picker with arrows and Enter', async () => {

@@ -5,7 +5,7 @@ import type {
 } from '@agentclientprotocol/sdk'
 import { render } from 'ink'
 import { useCallback, useEffect, useRef, useState } from 'react'
-
+import packageJson from '../package.json' with { type: 'json' }
 import {
   assertDshExists,
   currentOptionName,
@@ -20,6 +20,7 @@ import { type ApprovalMode, type Args, ArgsError, HELP, parseArgs } from './args
 import { type Answer, BridgeServer, type Question } from './bridge.js'
 import { HELP_TEXT, parseInput } from './commands.js'
 import { type Config, loadConfig, saveConfig } from './config.js'
+import type { HeaderInfo } from './header.js'
 import { expandMentions, listFiles } from './mentions.js'
 import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX } from './permissions.js'
 import { ensureProfile, PROFILE_NAME } from './profile.js'
@@ -122,6 +123,48 @@ function formatDate(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+const PLACEHOLDERS = [
+  'Try "fix typecheck errors"',
+  'Try "explain how this project is structured"',
+  'Try "write tests for @src/…"',
+  'Try "find and fix the failing test"',
+]
+
+/** Startup header: model with effort, account, folder, and where the model came from. */
+function headerInfo(
+  client: DshAcpClient,
+  cwd: string,
+  config: Config,
+  bridged: boolean,
+): HeaderInfo {
+  const name = currentOptionName(client.configOptions, 'model') ?? 'no model'
+  const effort = currentOptionName(client.configOptions, 'reasoning_effort')
+  const model = effort ? `${name} with ${effort.toLowerCase()} effort` : name
+  const provider = (() => {
+    try {
+      const value: unknown = JSON.parse(config.model)
+      return Array.isArray(value) ? String(value[0]) : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const account =
+    provider === 'deepseek-account'
+      ? 'DeepSeek account'
+      : provider === 'deepseek-official'
+        ? 'DeepSeek API'
+        : provider
+  const notes = [`Using ${name} (from ~/.deepcode/config.json) · /model`]
+  if (!bridged) notes.push('agent questions and plan mode are off (no bridge)')
+  return { version: VERSION, model, account, cwd, note: notes.join(' · ') }
+}
+
+const VERSION: string = packageJson.version
+
+function isConnected(server: BridgeServer | undefined): boolean {
+  return server?.connected === true
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -144,6 +187,10 @@ function Root({
   cwd: string
   onExit: (code: number) => void
 }) {
+  const [header, setHeader] = useState<HeaderInfo | undefined>()
+  const [placeholder] = useState(
+    () => PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)] ?? PLACEHOLDERS[0],
+  )
   const [planMode, setPlanMode] = useState(false)
   const [question, setQuestion] = useState<ActiveQuestion | undefined>()
   const [askingCustom, setAskingCustom] = useState(false)
@@ -353,8 +400,10 @@ function Root({
           await client.newSession()
           await applyModel()
         }
+        setHeader(headerInfo(client, cwd, initialConfig, isConnected(server)))
         if (args.resume === '') await showSessions()
       } catch (error) {
+        setHeader(headerInfo(client, cwd, initialConfig, false))
         say(`Failed to start dsh acp: ${describeError(error)}`, 'error')
         onExit(1)
       }
@@ -363,7 +412,20 @@ function Root({
       stopUpdates()
       stopExit()
     }
-  }, [client, hooks, args, cwd, onExit, say, applyModel, showSessions, setTranscript, resume])
+  }, [
+    client,
+    hooks,
+    server,
+    args,
+    cwd,
+    initialConfig,
+    onExit,
+    say,
+    applyModel,
+    showSessions,
+    setTranscript,
+    resume,
+  ])
 
   const switchPlan = (active: boolean): void => {
     const sessionId = client.sessionId
@@ -530,6 +592,8 @@ function Root({
 
   return (
     <App
+      header={header}
+      placeholder={placeholder}
       transcript={transcript}
       running={running}
       model={model}
