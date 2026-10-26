@@ -174,6 +174,9 @@ function headerInfo(
 
 const VERSION: string = packageJson.version
 
+/** Clear the screen and its scrollback and home the cursor (on startup and exit). */
+const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
+
 function isConnected(server: BridgeServer | undefined): boolean {
   return server?.connected === true
 }
@@ -952,12 +955,13 @@ async function main(): Promise<void> {
     // Let Ink flush the last frame, then leave even if streams are still open.
     setTimeout(() => {
       app.unmount()
+      // Leave a clean screen, as on startup; keep it when an error is shown.
+      if (code === 0) process.stdout.write(CLEAR_SCREEN)
       process.exit(code)
     }, 50)
   }
 
-  // Start on a clean screen: clear it, its scrollback, and home the cursor.
-  process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
+  process.stdout.write(CLEAR_SCREEN)
   const app = render(
     <Root
       client={client}
