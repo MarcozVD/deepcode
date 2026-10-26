@@ -21,9 +21,9 @@ describe('toHalfBlocks', () => {
     expect(row).toEqual([{ text: '▀▀', color: 'blue' }])
   })
 
-  it('renders the whale in ten rows', () => {
+  it('renders the whale in three rows, like the Claude Code mascot', () => {
     const rows = toHalfBlocks(WHALE, WHALE_COLORS)
-    expect(rows).toHaveLength(10)
+    expect(rows).toHaveLength(3)
     expect(rows.map(text).join('')).toMatch(/█/)
   })
 })

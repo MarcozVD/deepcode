@@ -8,26 +8,12 @@ import { theme } from './theme.js'
  * with half blocks, like Claude Code's mascot.
  */
 export const WHALE = [
-  '                bb      ',
-  '                bb      ',
-  '              bb  bb    ',
-  '              bb  bb    ',
-  'aa    aa        bb      ',
-  'aa    aa        bb      ',
-  'aaaaaaaa    aaaaaaaaaa  ',
-  'aaaaaaaa    aaaaaaaaaaaa',
-  '  aaaaa   aaaaaaaaaaaaaa',
-  '    a    aaaaaaaaaaaaaaa',
-  '    a    aaaaaaaaaaaaaaa',
-  '    aaaaaaaaaaaaaaaaaaaa',
-  '    aaaaaaaaaaaaaaawaaaa',
-  '    aaaaaaaaaaaaaaawaaaa',
-  '     aaaaaaaaaaaaaaaaaaa',
-  '       bbbbaaabbbbbbbb  ',
-  '       bbbbaaabbbbbbbb  ',
-  '          aaabbbbbbbb   ',
-  '          aaa           ',
-  '          aa            ',
+  '      b b  ',
+  'a  a   b   ',
+  ' aa  aaaaaa',
+  '  aaaaaaawa',
+  '  aaaaaaaaa',
+  '    aabbbb ',
 ]
 
 export const WHALE_COLORS: Record<string, string> = {
