@@ -80,6 +80,10 @@ export interface AppProps {
   extraCommands?: SlashCommand[] | undefined
   /** Workspace files for `@` completion. */
   files?: string[] | undefined
+  /** Input typed while the agent works, sent when the turn ends. */
+  queued?: string[] | undefined
+  /** ↑ in an empty input: take the queued input back to edit it. */
+  onEditQueued?: (() => string) | undefined
   onSubmit: (text: string) => void
   onCancel: () => void
   onPermission: (choiceId: string | undefined) => void
@@ -436,7 +440,7 @@ export function App(props: AppProps) {
       if (key.tab || key.return) {
         const next = completion.accept(menuIndex)
         // Enter on a command runs it right away, like Claude Code.
-        if (key.return && completion.kind === 'command' && !running) {
+        if (key.return && completion.kind === 'command') {
           const text = next.text.trim()
           history.current.unshift(text)
           historyIndex.current = -1
@@ -472,7 +476,7 @@ export function App(props: AppProps) {
         props.onSubmit(text)
         return
       }
-      if (text === '' || running) return
+      if (text === '') return
       history.current.unshift(text)
       historyIndex.current = -1
       clearInput()
@@ -481,6 +485,10 @@ export function App(props: AppProps) {
     }
     // History only while the prompt is a single line; otherwise ↑/↓ are inert.
     if (key.upArrow) {
+      if (input === '' && (props.queued?.length ?? 0) > 0 && props.onEditQueued) {
+        setEditor(setText(props.onEditQueued()))
+        return
+      }
       if (input.includes('\n')) return
       const next = Math.min(historyIndex.current + 1, history.current.length - 1)
       if (next >= 0) {
@@ -579,6 +587,12 @@ export function App(props: AppProps) {
         <EntryView key={entry.id} entry={entry} maxLines={liveLines} />
       ))}
       <TodoList todos={transcript.todos} />
+      {(props.queued ?? []).map((text, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: queue order is the identity
+        <Box key={index} marginTop={index === 0 ? 1 : 0}>
+          <Text color={theme.muted} wrap="truncate-end">{`> ${text.split('\n')[0]}`}</Text>
+        </Box>
+      ))}
       {running && permission === undefined && question === undefined ? (
         <Box marginTop={1}>
           <Text color={theme.accent}>✻ Working…</Text>
@@ -629,6 +643,7 @@ export function App(props: AppProps) {
           approval={props.approval}
           planMode={props.planMode === true}
           running={running}
+          queued={(props.queued?.length ?? 0) > 0}
           exitArmed={exitArmed}
         />
       )}
@@ -694,6 +709,8 @@ export function Footer(props: {
   approval: ApprovalMode
   planMode: boolean
   running: boolean
+  /** Whether input is waiting for the turn to end. */
+  queued?: boolean | undefined
   exitArmed: boolean
 }) {
   let left = <Text color={theme.muted}>? /help · @ files · shift+tab modes</Text>
@@ -712,7 +729,13 @@ export function Footer(props: {
         <Text color={theme.muted}> (shift+tab to cycle)</Text>
       </Text>
     )
-  } else if (props.running) left = <Text color={theme.muted}>esc to interrupt</Text>
+  } else if (props.running) {
+    left = (
+      <Text color={theme.muted}>
+        {props.queued ? 'esc to interrupt · ↑ to edit queued messages' : 'esc to interrupt'}
+      </Text>
+    )
+  }
   const usage = props.transcript.usage
   const tokens =
     usage !== undefined

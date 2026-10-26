@@ -92,6 +92,24 @@ describe('App', () => {
     expect(onSubmit).toHaveBeenCalledWith('line one\nline two')
   })
 
+  it('accepts input while a turn runs and shows what is queued', async () => {
+    const onSubmit = vi.fn()
+    const onEditQueued = vi.fn(() => 'then run tests')
+    const { stdin, lastFrame } = render(
+      <App {...props({ running: true, onSubmit, onEditQueued, queued: ['then run tests'] })} />,
+    )
+    expect(lastFrame()).toContain('> then run tests')
+    expect(lastFrame()).toContain('↑ to edit queued messages')
+    stdin.write('and lint')
+    await tick()
+    stdin.write(ENTER)
+    await tick()
+    expect(onSubmit).toHaveBeenCalledWith('and lint')
+    stdin.write('\u001b[A')
+    await tick()
+    expect(onEditQueued).toHaveBeenCalled()
+  })
+
   it('cancels a running turn on Esc', async () => {
     const onCancel = vi.fn()
     const { stdin, lastFrame } = render(<App {...props({ running: true, onCancel })} />)

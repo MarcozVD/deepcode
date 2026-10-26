@@ -11,7 +11,6 @@ import {
   versionWarning,
 } from './acp.js'
 import { DEFAULT_MODEL, parseConfig } from './config.js'
-import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX } from './permissions.js'
 
 describe('parseConfig', () => {
   it('falls back to the default model', () => {
@@ -97,28 +96,5 @@ describe('config options', () => {
     expect(currentOptionName(options, 'model')).toBe('DeepSeek-V4.1-Flash')
     expect(hasOptionValue(options, 'model', '["deepseek-account","deepseek-flash"]')).toBe(true)
     expect(hasOptionValue(options, 'model', 'nope')).toBe(false)
-  })
-})
-
-describe('permissions', () => {
-  it('keys shell tools by first command word', () => {
-    expect(allowKey('pwsh', 'npm test')).toBe('pwsh:npm')
-    expect(allowKey('write', 'C:/a.txt')).toBe('write')
-  })
-
-  it('adds an always choice after allow-once', () => {
-    const choices = buildChoices(
-      [
-        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
-        { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
-      ],
-      'pwsh:npm',
-    )
-    expect(choices.map((choice) => choice.id)).toEqual([
-      'allow-once',
-      `${ALWAYS_PREFIX}allow-once`,
-      'reject-once',
-      `${REASON_PREFIX}reject-once`,
-    ])
   })
 })

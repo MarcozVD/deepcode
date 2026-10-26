@@ -24,10 +24,17 @@ import type { HeaderInfo } from './header.js'
 import { type ConfiguredServer, describeServer, loadServers, toAcpServers } from './mcp.js'
 import { McpCliError, runMcpCli } from './mcpCli.js'
 import { expandMentions, listFiles } from './mentions.js'
-import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX } from './permissions.js'
+import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX, TOOL_PREFIX } from './permissions.js'
 import { ensureProfile, PROFILE_NAME } from './profile.js'
 import { type HistoryItem, readStoredSession, sessionModified } from './sessions.js'
-import { addEntry, applyUpdate, emptyTranscript, type Transcript } from './transcript.js'
+import {
+  addEntry,
+  applyUpdate,
+  emptyTranscript,
+  justification,
+  summarizeInput,
+  type Transcript,
+} from './transcript.js'
 import {
   App,
   type PendingPermission,
@@ -70,7 +77,11 @@ function questionView(active: ActiveQuestion): PendingQuestion | undefined {
 
 interface ActivePermission {
   view: PendingPermission
+  /** Tool name, remembered by "don't ask again for any <tool>". */
+  title: string
   key: string
+  /** The agent's allow-once option, used to answer allowlisted requests. */
+  allowOnce: string | undefined
   resolve: (response: RequestPermissionResponse) => void
 }
 
@@ -283,6 +294,19 @@ function Root({
   const approvalRef = useRef(approval)
   approvalRef.current = approval
   const allowed = useRef(new Set<string>())
+  const permissionQueue = useRef<ActivePermission[]>([])
+  /** Prompts typed while the agent works, sent when the turn ends. */
+  const [queued, setQueued] = useState<string[]>([])
+  const queuedRef = useRef<string[]>([])
+  const runningRef = useRef(false)
+
+  /** Answer a request the session allowlist covers; false if it must ask. */
+  const autoAllow = useCallback((request: ActivePermission): boolean => {
+    const covered = allowed.current.has(request.key) || allowed.current.has(request.title)
+    if (!covered || request.allowOnce === undefined) return false
+    request.resolve({ outcome: { outcome: 'selected', optionId: request.allowOnce } })
+    return true
+  }, [])
 
   const say = useCallback(
     (text: string, tone: 'info' | 'error' = 'info'): void =>
@@ -458,8 +482,20 @@ function Root({
           (entry) => entry.kind === 'tool' && entry.callId === request.toolCall.toolCallId,
         )
         const title = request.toolCall.title ?? (tool?.kind === 'tool' ? tool.title : 'tool')
-        const detail = tool?.kind === 'tool' ? tool.detail : ''
-        const reason = tool?.kind === 'tool' ? tool.reason : ''
+        // The request's own input first: the tool entry may not have it yet.
+        const rawInput = request.toolCall.rawInput
+        const detail =
+          rawInput !== undefined
+            ? summarizeInput(rawInput)
+            : tool?.kind === 'tool'
+              ? tool.detail
+              : ''
+        const reason =
+          rawInput !== undefined
+            ? justification(rawInput)
+            : tool?.kind === 'tool'
+              ? tool.reason
+              : ''
         const key = allowKey(title, detail)
         const allowOnce = request.options.find((option) => option.kind === 'allow_once')
         const rejectOnce = request.options.find((option) => option.kind === 'reject_once')
@@ -471,15 +507,17 @@ function Root({
           )
           return
         }
-        if (allowed.current.has(key) && allowOnce !== undefined) {
-          resolve({ outcome: { outcome: 'selected', optionId: allowOnce.optionId } })
-          return
-        }
-        setPermission({
-          view: { title, detail, reason, choices: buildChoices(request.options, key) },
+        const active: ActivePermission = {
+          view: { title, detail, reason, choices: buildChoices(request.options, key, title) },
+          title,
           key,
+          allowOnce: allowOnce?.optionId,
           resolve,
-        })
+        }
+        if (autoAllow(active)) return
+        // Parallel tool calls ask at the same time: show them one by one.
+        permissionQueue.current.push(active)
+        if (permissionQueue.current.length === 1) setPermission(active)
       })
 
     void (async () => {
@@ -527,6 +565,7 @@ function Root({
     mcp,
     refreshSkills,
     openSession,
+    autoAllow,
   ])
 
   const switchPlan = (active: boolean): void => {
@@ -643,6 +682,12 @@ function Root({
   }
 
   const submit = (text: string): void => {
+    // While the agent works, hold input and send it when the turn ends.
+    if (runningRef.current) {
+      queuedRef.current = [...queuedRef.current, text]
+      setQueued(queuedRef.current)
+      return
+    }
     const parsed = parseInput(text)
     if (parsed.kind === 'command') {
       runCommand(parsed.name)
@@ -665,6 +710,7 @@ function Root({
         state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')
       return addEntry(done ? { ...state, todos: [] } : state, { kind: 'user', text })
     })
+    runningRef.current = true
     setRunning(true)
     expandMentions(prompt ?? text, cwd)
       .then(({ prompt, attached }) => {
@@ -677,6 +723,7 @@ function Root({
       })
       .catch((error: unknown) => say(describeError(error), 'error'))
       .finally(() => {
+        runningRef.current = false
         setRunning(false)
         // The agent may have created or removed files or skills: refresh completion.
         void listFiles(cwd).then(setFiles)
@@ -685,7 +732,33 @@ function Root({
         const reason = pendingReason.current
         pendingReason.current = undefined
         if (reason !== undefined) sendPrompt(reason)
+        else drainRef.current()
       })
+  }
+
+  /** All queued input, removed from the queue (Esc puts it back in the editor). */
+  const takeQueued = (): string => {
+    const text = queuedRef.current.join('\n')
+    queuedRef.current = []
+    setQueued([])
+    return text
+  }
+
+  /**
+   * Send queued input in order: commands run right away, the first prompt
+   * starts a turn and the rest wait for it. A ref, so a turn that ends in an
+   * old render still drains with the current skills and state.
+   */
+  const drainRef = useRef(() => {})
+  drainRef.current = () => {
+    while (queuedRef.current.length > 0 && !runningRef.current) {
+      const [next = '', ...rest] = queuedRef.current
+      queuedRef.current = rest
+      setQueued(rest)
+      submit(next)
+      // A skill loads asynchronously before its turn starts; wait for it.
+      if (parseInput(next).kind === 'unknown') return
+    }
   }
 
   /** The user's "what to do instead" after rejecting a permission. */
@@ -700,20 +773,26 @@ function Root({
 
   const answerPermission = (choiceId: string | undefined): void => {
     if (permission === undefined) return
-    setPermission(undefined)
+    permissionQueue.current = permissionQueue.current.filter((item) => item !== permission)
     if (choiceId === undefined) {
       permission.resolve({ outcome: { outcome: 'cancelled' } })
-      return
+    } else {
+      let optionId = choiceId
+      if (choiceId.startsWith(ALWAYS_PREFIX)) {
+        allowed.current.add(permission.key)
+        optionId = choiceId.slice(ALWAYS_PREFIX.length)
+      } else if (choiceId.startsWith(TOOL_PREFIX)) {
+        allowed.current.add(permission.title)
+        optionId = choiceId.slice(TOOL_PREFIX.length)
+      } else if (choiceId.startsWith(REASON_PREFIX)) {
+        optionId = choiceId.slice(REASON_PREFIX.length)
+        setAskingReason(true)
+      }
+      permission.resolve({ outcome: { outcome: 'selected', optionId } })
     }
-    let optionId = choiceId
-    if (choiceId.startsWith(ALWAYS_PREFIX)) {
-      allowed.current.add(permission.key)
-      optionId = choiceId.slice(ALWAYS_PREFIX.length)
-    } else if (choiceId.startsWith(REASON_PREFIX)) {
-      optionId = choiceId.slice(REASON_PREFIX.length)
-      setAskingReason(true)
-    }
-    permission.resolve({ outcome: { outcome: 'selected', optionId } })
+    // Requests that waited behind this one may be covered by the new answer.
+    permissionQueue.current = permissionQueue.current.filter((item) => !autoAllow(item))
+    setPermission(permissionQueue.current[0])
   }
 
   return (
@@ -748,7 +827,15 @@ function Root({
             ? () => setAskingReason(false)
             : undefined
       }
+      queued={queued}
+      onEditQueued={takeQueued}
       onCancel={() => {
+        // ACP: pending permission requests are answered cancelled on cancel.
+        for (const item of permissionQueue.current) {
+          item.resolve({ outcome: { outcome: 'cancelled' } })
+        }
+        permissionQueue.current = []
+        setPermission(undefined)
         client.cancel().catch(() => {})
       }}
       onPermission={answerPermission}
@@ -869,6 +956,8 @@ async function main(): Promise<void> {
     }, 50)
   }
 
+  // Start on a clean screen: clear it, its scrollback, and home the cursor.
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
   const app = render(
     <Root
       client={client}
