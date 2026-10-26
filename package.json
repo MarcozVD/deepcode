@@ -1,0 +1,49 @@
+{
+  "name": "deepcode",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Terminal UI (like Claude Code) for DeepSeek Harness over the Agent Client Protocol",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "deepcode": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.strict.json",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lefthook"
+    ]
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.9.0",
+    "ink": "^8.0.0",
+    "react": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "ink-testing-library": "^4.0.0",
+    "lefthook": "^2.2.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "files": [
+    "dist/cli.js",
+    "README.md",
+    "LICENSE"
+  ]
+}
