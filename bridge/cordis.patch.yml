@@ -1,0 +1,21 @@
+# deepcode bridge, layered after dsh-base and dsh-acp-app.
+#
+# dsh-acp does not forward agent questions, and it does not run slash
+# commands, so plan mode cannot be switched over ACP. This bundle adds the
+# model-facing ask_user_question and todo_write tools and a small plugin that relays
+# questions and plan-mode switches to the deepcode TUI over a local pipe
+# (DEEPCODE_BRIDGE). Without that variable the plugin stays inert.
+
+- insert:
+    - id: tool-ask-user
+      name: "@deepseek-ai/dsh-tool-ask-user"
+
+    # The agent's task list; deepcode shows it above the input.
+    - id: tool-todo
+      name: "@deepseek-ai/dsh-tool-todo"
+      config:
+        allowParallelInProgress: false
+
+    - id: deepcode-bridge
+      name: deepcode-bridge
+      inject: [agents]

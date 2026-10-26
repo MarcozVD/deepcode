@@ -41,7 +41,20 @@ deepcode --resume <id>    # resume a specific session
 deepcode --careful        # read-only sandbox: every write or command asks first
 deepcode --yolo           # never ask: sandbox escalations are rejected automatically
 deepcode --dangerously-full-access   # no sandbox at all
+deepcode --no-bridge      # plain `dsh acp`: no agent questions, plan mode or task list
 ```
+
+On first run deepcode creates a `deepcode` dsh profile (`~/.dsh/profiles/deepcode`): dsh-base + dsh-acp-app + the bundle in [`bridge/`](bridge). The bridge adds the agent's `ask_user_question` and `todo_write` tools and relays questions and plan mode to the terminal over a local pipe, because dsh's ACP server does not forward them. If the profile cannot be prepared, deepcode falls back to `dsh acp` and says so.
+
+### Plan mode
+
+Shift+Tab cycles **normal → plan mode → auto-reject → normal** (or use `/plan`). In plan mode the agent investigates and writes a plan instead of changing files, then presents it for review: approve to leave plan mode and carry it out, keep planning, or keep planning with written feedback.
+
+### Agent questions, tasks and mentions
+
+- When the agent asks something, pick an option by number (Space toggles in multi-select questions) or type your own answer.
+- The agent's task list (`todo_write`) is shown above the input.
+- Type `@` to complete a workspace file with Tab; mentioned files (up to 64 KB) are attached to the prompt.
 
 ### Keys
 
@@ -54,7 +67,8 @@ deepcode --dangerously-full-access   # no sandbox at all
 | Ctrl+W, Ctrl+U | Delete word / to start of line |
 | ↑ ↓ | Prompt history |
 | Esc | Interrupt the agent (or clear the input) |
-| Shift+Tab | Toggle ask / auto-reject for sandbox escalations |
+| Shift+Tab | Cycle normal / plan mode / auto-reject |
+| Tab | Complete an `@` file mention |
 | Ctrl+C twice | Exit |
 
 ### Commands
@@ -63,6 +77,7 @@ deepcode --dangerously-full-access   # no sandbox at all
 | --- | --- |
 | `/model` | Choose the model (saved in `~/.deepcode/config.json`) |
 | `/effort` | Choose the reasoning effort (saved) |
+| `/plan` | Toggle plan mode |
 | `/resume` | Resume a session from this folder |
 | `/clear` | Start a new session |
 | `/help` | List commands and keys |
@@ -94,8 +109,8 @@ Design decisions and dsh findings are in [docs/PLAN.md](docs/PLAN.md).
 
 ## Not yet supported
 
-- Agent questions (`ask_user_question`) and plan mode: dsh's ACP server does not forward them.
-- `@` file mentions, image input.
+- Image input (dsh's ACP server reports no image support).
+- Subagent activity is not shown separately.
 
 ## License
 

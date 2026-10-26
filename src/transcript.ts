@@ -24,13 +24,25 @@ export interface DiffLine {
   text: string
 }
 
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 export interface Transcript {
   entries: Entry[]
   nextId: number
   usage: { used: number; size: number } | undefined
+  /** The agent's current task list (ACP `plan` updates), shown above the input. */
+  todos: TodoItem[]
 }
 
-export const emptyTranscript: Transcript = { entries: [], nextId: 0, usage: undefined }
+export const emptyTranscript: Transcript = {
+  entries: [],
+  nextId: 0,
+  usage: undefined,
+  todos: [],
+}
 
 type NewEntry = Entry extends infer E ? (E extends Entry ? Omit<E, 'id'> : never) : never
 
@@ -139,6 +151,27 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
+const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed'])
+
+/**
+ * dsh's `todo_write` tool carries the agent's whole task list in its input
+ * (dsh-acp sends no ACP `plan` updates), so mirror it into `todos`.
+ */
+export function withTodos(state: Transcript, title: string, rawInput: unknown): Transcript {
+  if (title !== 'todo_write' || rawInput === null || typeof rawInput !== 'object') return state
+  const raw = (rawInput as { todos?: unknown }).todos
+  if (!Array.isArray(raw)) return state
+  const todos: TodoItem[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const { content, status } = item as { content?: unknown; status?: unknown }
+    if (typeof content === 'string' && typeof status === 'string' && TODO_STATUSES.has(status)) {
+      todos.push({ content, status: status as TodoItem['status'] })
+    }
+  }
+  return { ...state, todos }
+}
+
 export function applyUpdate(state: Transcript, update: SessionUpdate): Transcript {
   switch (update.sessionUpdate) {
     case 'agent_message_chunk':
@@ -150,7 +183,7 @@ export function applyUpdate(state: Transcript, update: SessionUpdate): Transcrip
         ? appendText(state, 'thought', update.content.text)
         : state
     case 'tool_call':
-      return addEntry(state, {
+      return addEntry(withTodos(state, update.title, update.rawInput), {
         kind: 'tool',
         callId: update.toolCallId,
         title: update.title,
@@ -182,10 +215,17 @@ export function applyUpdate(state: Transcript, update: SessionUpdate): Transcrip
       }
       const entries = state.entries.slice()
       entries[index] = next
-      return { ...state, entries }
+      return withTodos({ ...state, entries }, next.title, update.rawInput)
     }
     case 'usage_update':
       return { ...state, usage: { used: update.used, size: update.size } }
+    case 'plan':
+      return {
+        ...state,
+        todos: update.entries.map((entry) => ({ content: entry.content, status: entry.status })),
+      }
+    case 'plan_removed':
+      return { ...state, todos: [] }
     default:
       return state
   }

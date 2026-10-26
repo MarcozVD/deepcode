@@ -38,10 +38,22 @@ The first design (Ink running inside dsh as a bundle) failed live: on Windows ds
 | Q16 | Record tested dsh version (`0.2.1-rc.2`); warn if `initialize` reports something unexpected. No `engines.dsh`. |
 | Q17 | dsh-acp already uses Desktop credentials/account. |
 | Q18 | "Always this session" = TUI-side allowlist (tool name + first shell word) answering `session/request_permission` automatically. "No + reason" = reject, then send the reason as the next prompt text. |
-| Q19/Q23 | Agent questions (`ask_user_question`) not available over ACP: dropped from v1, revisit in v3 with plan mode. |
+| Q19/Q23 | Agent questions (`ask_user_question`) are not available over plain ACP; implemented through the bridge bundle (see below). |
 | Q20 | `/resume` and `--resume [id]` use ACP session list/resume, filtered to current cwd. ACP gives no titles and resume does not replay, so titles, dates and the last 30 history items are read from dsh's own log (`~/.dsh/sessions/<cwd>/<id>/session.v4.jsonl.zstd`, concatenated zstd frames, Node >= 22.15 `zlib.zstdDecompressSync`). |
 | Q21/Q22 | Verified: dsh-acp does not execute slash commands (`/permission` reaches the model as text), and the sandbox mode is pinned per session at creation from `DSH_PERMISSION_MODE` (a resumed session keeps its mode). So: sandbox chosen at launch — default `workspace-write`, `--careful` = `read-only` (writes/commands escalate and ask), `--dangerously-full-access` = `danger-full-access`. Shift+Tab toggles the TUI's approval mode live: ask ↔ auto-reject (escalations rejected without asking = Q21 yolo); `--yolo` starts in auto-reject. |
 | Q24 | Model: last choice saved in `~/.deepcode/config.json` (zod-validated); first run `["deepseek-account","deepseek-flash"]` (ACP default `deepseek-official` needs `DEEPSEEK_API_KEY`). Applied with `session/set_config_option` after `session/new`. |
+
+## Bridge bundle (added 2026-10-25: questions, plan mode, tasks)
+
+dsh-acp forwards neither `user-questions/request` nor slash commands, so Q19/Q23 (agent questions) and plan mode could not work over plain ACP. deepcode now runs its own dsh profile instead of `acp`:
+
+- Profile `~/.dsh/profiles/deepcode`: bundles `[@deepseek-ai/dsh-base, @deepseek-ai/dsh-acp-app, deepcode-bridge]`, created on first run with `dsh plugin --profile deepcode add link:<repo>/bridge` and the bundle list pinned (`src/profile.ts`). Launched as `dsh --profile deepcode`. Falls back to `dsh acp` if setup fails; `--no-bridge` forces the fallback.
+- `bridge/` (plain ESM, no build) inserts `@deepseek-ai/dsh-tool-ask-user`, `@deepseek-ai/dsh-tool-todo` and the `deepcode-bridge` plugin. The plugin connects to the pipe in `DEEPCODE_BRIDGE` (a named pipe the TUI listens on, `src/bridge.ts`) and speaks newline JSON: questions/answers/cancel/abort, `plan/mode` events, `setPlan` → `ctx.planMode.set(ctx.agents.get(sessionId), active)`, `getPlan`.
+- Gotcha: a linked bundle cannot import `@deepseek-ai/*` (resolution fails from the link target). Errors are thrown as plain `Error` with `name: 'UserQuestionError'` and `code`, which dsh restores into its typed error.
+- Plan review is a user question with `intent.kind: 'plan-review'` and options Approve / Keep planning; free text becomes `custom` feedback.
+- Task list: dsh-acp sends no ACP `plan` updates; the TUI mirrors `todo_write` tool input into its task list.
+- Shift+Tab cycle: normal → plan → auto-reject (Q10); plan is skipped without the bridge.
+- `@` mentions: completion from a workspace file index (refreshed after each turn); mentioned files up to 64 KB are inlined into the prompt (dsh-acp advertises no embedded-context support).
 
 ## dsh internals (reference only, for later bundle work)
 

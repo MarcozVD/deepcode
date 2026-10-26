@@ -7,6 +7,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: 'help', description: 'Show commands and keys' },
   { name: 'model', description: 'Choose the model' },
   { name: 'effort', description: 'Choose the reasoning effort' },
+  { name: 'plan', description: 'Toggle plan mode (plan first, edit after approval)' },
   { name: 'resume', description: 'Resume a previous session in this folder' },
   { name: 'clear', description: 'Start a new session' },
   { name: 'exit', description: 'Quit deepcode' },
@@ -34,5 +35,5 @@ export const HELP_TEXT = [
   ...COMMANDS.map((command) => `  /${command.name.padEnd(8)} ${command.description}`),
   '',
   'Keys: Enter send · \\+Enter newline · ↑/↓ history · Esc interrupt',
-  '      Shift+Tab ask/auto-reject · Ctrl+C twice exit',
+  '      Shift+Tab normal/plan/auto-reject · @ mention files (Tab completes) · Ctrl+C twice exit',
 ].join('\n')

@@ -10,6 +10,7 @@ describe('parseArgs', () => {
       version: false,
       sandbox: 'workspace-write',
       approval: 'ask',
+      noBridge: false,
       resume: undefined,
     })
   })
@@ -36,7 +37,7 @@ describe('parseInput', () => {
   it('separates prompts, commands and unknown commands', () => {
     expect(parseInput('hello')).toEqual({ kind: 'prompt', text: 'hello' })
     expect(parseInput('/Model')).toEqual({ kind: 'command', name: 'model', args: '' })
-    expect(parseInput('/plan now')).toEqual({ kind: 'unknown', name: 'plan' })
+    expect(parseInput('/nope now')).toEqual({ kind: 'unknown', name: 'nope' })
     expect(parseInput('//etc is a path')).toEqual({ kind: 'prompt', text: '/etc is a path' })
   })
 })

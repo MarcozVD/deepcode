@@ -198,6 +198,86 @@ describe('App', () => {
     expect(tailLines('a\nb', 5)).toBe('a\nb')
   })
 
+  it('answers a single-choice question by number and offers free text', async () => {
+    const onQuestion = vi.fn()
+    const question = {
+      header: 'Color',
+      question: 'Which color?',
+      options: [{ label: 'Red', description: 'warm' }, { label: 'Blue' }],
+      multiSelect: false,
+      customLabel: 'Type something else…',
+      position: '',
+    }
+    const { stdin, lastFrame } = render(<App {...props({ question, onQuestion })} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Which color?')
+    expect(frame).toContain('1. Red')
+    expect(frame).toContain('3. Type something else…')
+    stdin.write('2')
+    await tick()
+    expect(onQuestion).toHaveBeenLastCalledWith({ kind: 'selected', labels: ['Blue'] })
+    stdin.write('3')
+    await tick()
+    expect(onQuestion).toHaveBeenLastCalledWith({ kind: 'custom' })
+    stdin.write(ESC)
+    await tick()
+    expect(onQuestion).toHaveBeenLastCalledWith({ kind: 'dismissed' })
+  })
+
+  it('toggles several options in a multi-select question', async () => {
+    const onQuestion = vi.fn()
+    const question = {
+      header: '',
+      question: 'Pick toppings',
+      options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }],
+      multiSelect: true,
+      customLabel: 'Other…',
+      position: '(1/2)',
+    }
+    const { stdin, lastFrame } = render(<App {...props({ question, onQuestion })} />)
+    stdin.write(' ')
+    await tick()
+    stdin.write(DOWN)
+    await tick()
+    stdin.write(DOWN)
+    await tick()
+    stdin.write(' ')
+    await tick()
+    expect(lastFrame()).toContain('[x] A')
+    expect(lastFrame()).toContain('[x] C')
+    stdin.write(ENTER)
+    await tick()
+    expect(onQuestion).toHaveBeenCalledWith({ kind: 'selected', labels: ['A', 'C'] })
+  })
+
+  it('shows plan mode and the agent task list', () => {
+    const transcript = applyUpdate(emptyTranscript, {
+      sessionUpdate: 'plan',
+      entries: [
+        { content: 'Read the code', status: 'completed', priority: 'medium' },
+        { content: 'Write the fix', status: 'in_progress', priority: 'high' },
+      ],
+    })
+    const frame = render(<App {...props({ transcript, planMode: true })} />).lastFrame() ?? ''
+    expect(frame).toContain('plan mode')
+    expect(frame).toContain('☑ Read the code')
+    expect(frame).toContain('◐ Write the fix')
+  })
+
+  it('suggests files for @ and completes with Tab', async () => {
+    const onSubmit = vi.fn()
+    const files = ['src/ui.tsx', 'README.md']
+    const { stdin, lastFrame } = render(<App {...props({ files, onSubmit })} />)
+    stdin.write('see @ui')
+    await tick()
+    expect(lastFrame()).toContain('@src/ui.tsx  (Tab)')
+    stdin.write('\t')
+    await tick()
+    stdin.write(ENTER)
+    await tick()
+    expect(onSubmit).toHaveBeenCalledWith('see @src/ui.tsx')
+  })
+
   it('picks from a picker with arrows and Enter', async () => {
     const onPick = vi.fn()
     const picker = {

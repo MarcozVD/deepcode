@@ -50,8 +50,8 @@ const outputs = await Promise.all([
   // scripts (e.g. scripts/smoke.mjs) can drive `dsh acp` directly.
   build({
     ...shared,
-    entryPoints: ['src/acp.ts'],
-    outfile: 'dist/acp.js',
+    entryPoints: ['src/acp.ts', 'src/bridge.ts', 'src/profile.ts'],
+    outdir: 'dist',
   }),
 ])
 

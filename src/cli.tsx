@@ -17,15 +17,52 @@ import {
   versionWarning,
 } from './acp.js'
 import { type ApprovalMode, type Args, ArgsError, HELP, parseArgs } from './args.js'
+import { type Answer, BridgeServer, type Question } from './bridge.js'
 import { HELP_TEXT, parseInput } from './commands.js'
 import { type Config, loadConfig, saveConfig } from './config.js'
+import { expandMentions, listFiles } from './mentions.js'
 import { ALWAYS_PREFIX, allowKey, buildChoices, REASON_PREFIX } from './permissions.js'
+import { ensureProfile, PROFILE_NAME } from './profile.js'
 import { type HistoryItem, readStoredSession, sessionModified } from './sessions.js'
 import { addEntry, applyUpdate, emptyTranscript, type Transcript } from './transcript.js'
-import { App, type PendingPermission, type PermissionChoice, type Picker } from './ui.js'
+import {
+  App,
+  type PendingPermission,
+  type PendingQuestion,
+  type PermissionChoice,
+  type Picker,
+  type QuestionChoice,
+} from './ui.js'
 
-interface Bridge {
+/**
+ * Callbacks that outlive React renders: the ACP client and the bridge call
+ * these, and Root swaps in implementations bound to its state.
+ */
+interface Hooks {
   permission: (request: RequestPermissionRequest) => Promise<RequestPermissionResponse>
+  question: (questions: Question[], signal: AbortSignal) => Promise<Answer[] | undefined>
+  plan: (sessionId: string, active: boolean) => void
+}
+
+interface ActiveQuestion {
+  questions: Question[]
+  index: number
+  answers: Answer[]
+  resolve: (answers: Answer[] | undefined) => void
+}
+
+function questionView(active: ActiveQuestion): PendingQuestion | undefined {
+  const question = active.questions[active.index]
+  if (question === undefined) return undefined
+  const review = question.intent?.kind === 'plan-review'
+  return {
+    header: question.header ?? '',
+    question: question.question,
+    options: question.options,
+    multiSelect: question.multiSelect,
+    customLabel: review ? 'Keep planning, with feedback…' : 'Type something else…',
+    position: active.questions.length > 1 ? `(${active.index + 1}/${active.questions.length})` : '',
+  }
 }
 
 interface ActivePermission {
@@ -91,19 +128,26 @@ function describeError(error: unknown): string {
 
 function Root({
   client,
-  bridge,
+  hooks,
+  server,
   args,
   initialConfig,
   cwd,
   onExit,
 }: {
   client: DshAcpClient
-  bridge: Bridge
+  hooks: Hooks
+  /** The bridge pipe, when the deepcode profile is in use. */
+  server: BridgeServer | undefined
   args: Args
   initialConfig: Config
   cwd: string
   onExit: (code: number) => void
 }) {
+  const [planMode, setPlanMode] = useState(false)
+  const [question, setQuestion] = useState<ActiveQuestion | undefined>()
+  const [askingCustom, setAskingCustom] = useState(false)
+  const [files, setFiles] = useState<string[]>([])
   const [transcript, setTranscriptState] = useState<Transcript>(emptyTranscript)
   const [running, setRunning] = useState(false)
   const [model, setModel] = useState<string | undefined>()
@@ -193,8 +237,10 @@ function Root({
         tone: 'info',
       })
       setTranscript(state)
+      setPlanMode(false)
+      server?.requestPlanState(id)
     },
-    [client, applyModel, setTranscript],
+    [client, applyModel, setTranscript, server],
   )
 
   const showSessions = useCallback(async (): Promise<void> => {
@@ -233,7 +279,38 @@ function Root({
       say(message, 'error')
       onExit(1)
     })
-    bridge.permission = (request) =>
+    hooks.question = (questions, signal) =>
+      new Promise((resolve) => {
+        if (questions.length === 0) {
+          resolve([])
+          return
+        }
+        // A plan under review is long: print it into the transcript once,
+        // and keep only the question itself in the live prompt.
+        for (const item of questions) {
+          if (item.detail) {
+            const title = item.intent?.kind === 'plan-review' ? 'Plan for review' : item.header
+            setTranscript((state) =>
+              addEntry(state, {
+                kind: 'assistant',
+                text: `**${title ?? 'Details'}**\n\n${item.detail}`,
+              }),
+            )
+          }
+        }
+        const finish = (answers: Answer[] | undefined): void => {
+          setQuestion(undefined)
+          setAskingCustom(false)
+          resolve(answers)
+        }
+        signal.addEventListener('abort', () => finish(undefined), { once: true })
+        setQuestion({ questions, index: 0, answers: [], resolve: finish })
+      })
+    hooks.plan = (sessionId, active) => {
+      if (sessionId === client.sessionId) setPlanMode(active)
+    }
+    void listFiles(cwd).then(setFiles)
+    hooks.permission = (request) =>
       new Promise((resolve) => {
         const tool = transcriptRef.current.entries.find(
           (entry) => entry.kind === 'tool' && entry.callId === request.toolCall.toolCallId,
@@ -286,7 +363,66 @@ function Root({
       stopUpdates()
       stopExit()
     }
-  }, [client, bridge, args, onExit, say, applyModel, showSessions, setTranscript, resume])
+  }, [client, hooks, args, cwd, onExit, say, applyModel, showSessions, setTranscript, resume])
+
+  const switchPlan = (active: boolean): void => {
+    const sessionId = client.sessionId
+    if (server === undefined || !server.connected || sessionId === undefined) {
+      say('Plan mode needs the deepcode dsh profile; it is not available in this session.', 'error')
+      return
+    }
+    void server.setPlan(sessionId, active).then((outcome) => {
+      if (outcome === 'error') say('Could not switch plan mode.', 'error')
+      else if (outcome === 'queued') say(`Plan mode ${active ? 'on' : 'off'} from the next step.`)
+      if (outcome === 'committed' || outcome === 'queued' || outcome === 'noop') setPlanMode(active)
+    })
+  }
+
+  /** Shift+Tab: normal → plan → auto-reject → normal (plan only with the bridge). */
+  const cycleMode = (): void => {
+    if (planMode) {
+      switchPlan(false)
+      setApproval('auto-reject')
+    } else if (approval === 'auto-reject') {
+      setApproval('ask')
+    } else if (server?.connected) {
+      switchPlan(true)
+    } else {
+      setApproval('auto-reject')
+    }
+  }
+
+  const answerQuestion = (choice: QuestionChoice): void => {
+    if (question === undefined) return
+    const current = question.questions[question.index]
+    if (current === undefined) return
+    if (choice.kind === 'dismissed') {
+      question.resolve(undefined)
+      return
+    }
+    if (choice.kind === 'custom') {
+      setAskingCustom(true)
+      return
+    }
+    recordAnswer({ id: current.id, selected: choice.labels })
+  }
+
+  const recordAnswer = (answer: Answer): void => {
+    if (question === undefined) return
+    const answers = [...question.answers, answer]
+    if (question.index + 1 < question.questions.length) {
+      setQuestion({ ...question, index: question.index + 1, answers })
+    } else {
+      question.resolve(answers)
+    }
+  }
+
+  const submitCustom = (text: string): void => {
+    setAskingCustom(false)
+    const current = question?.questions[question.index]
+    if (current === undefined) return
+    recordAnswer({ id: current.id, selected: [], custom: text.trim() })
+  }
 
   const runCommand = (name: string): void => {
     switch (name) {
@@ -316,6 +452,9 @@ function Root({
       case 'effort':
         chooseOption('reasoning_effort', 'Choose the reasoning effort', 'effort')
         return
+      case 'plan':
+        switchPlan(!planMode)
+        return
     }
   }
 
@@ -333,10 +472,18 @@ function Root({
   }
 
   const sendPrompt = (text: string): void => {
-    setTranscript((state) => addEntry(state, { kind: 'user', text }))
+    setTranscript((state) => {
+      // A finished task list has done its job; drop it when new work starts.
+      const done =
+        state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')
+      return addEntry(done ? { ...state, todos: [] } : state, { kind: 'user', text })
+    })
     setRunning(true)
-    client
-      .prompt(text)
+    expandMentions(text, cwd)
+      .then(({ prompt, attached }) => {
+        if (attached.length > 0) say(`Attached ${attached.join(', ')}`)
+        return client.prompt(prompt)
+      })
       .then((stopReason) => {
         if (stopReason === 'cancelled') say('Interrupted')
         else if (stopReason !== 'end_turn') say(`Turn ended: ${stopReason}`)
@@ -344,6 +491,8 @@ function Root({
       .catch((error: unknown) => say(describeError(error), 'error'))
       .finally(() => {
         setRunning(false)
+        // The agent may have created or removed files: refresh @ completion.
+        void listFiles(cwd).then(setFiles)
         // A rejection reason typed during the turn goes out as the next prompt.
         const reason = pendingReason.current
         pendingReason.current = undefined
@@ -387,13 +536,27 @@ function Root({
       cwd={cwd}
       sandbox={client.sandbox}
       approval={approval}
+      planMode={planMode}
       permission={permission?.view}
       picker={picker?.view}
-      onSubmit={askingReason ? submitReason : submit}
+      question={question === undefined ? undefined : questionView(question)}
+      files={files}
+      onQuestion={answerQuestion}
+      onSubmit={askingCustom ? submitCustom : askingReason ? submitReason : submit}
       inputLabel={
-        askingReason ? 'What should the agent do instead? (Enter send · Esc skip)' : undefined
+        askingCustom
+          ? 'Your answer (Enter send · Esc back to the options)'
+          : askingReason
+            ? 'What should the agent do instead? (Enter send · Esc skip)'
+            : undefined
       }
-      onInputCancel={askingReason ? () => setAskingReason(false) : undefined}
+      onInputCancel={
+        askingCustom
+          ? () => setAskingCustom(false)
+          : askingReason
+            ? () => setAskingReason(false)
+            : undefined
+      }
       onCancel={() => {
         client.cancel().catch(() => {})
       }}
@@ -403,7 +566,7 @@ function Root({
         setPicker(undefined)
         if (active !== undefined && id !== undefined) active.pick(id)
       }}
-      onToggleApproval={() => setApproval((mode) => (mode === 'ask' ? 'auto-reject' : 'ask'))}
+      onToggleApproval={cycleMode}
       onExit={() => onExit(0)}
     />
   )
@@ -443,13 +606,40 @@ async function main(): Promise<void> {
 
   const cwd = process.cwd()
   const config = await loadConfig()
-  const bridge: Bridge = {
+  const hooks: Hooks = {
     permission: () => Promise.resolve({ outcome: { outcome: 'cancelled' } }),
+    question: () => Promise.resolve(undefined),
+    plan: () => {},
+  }
+
+  // The deepcode profile adds agent questions and plan mode on top of
+  // `dsh acp`. If it cannot be prepared, fall back to the stock profile.
+  let server: BridgeServer | undefined
+  if (!args.noBridge) {
+    const setupLog: string[] = []
+    const ready = await ensureProfile(defaultDshPath(), (line) => setupLog.push(line))
+    if (ready) {
+      server = new BridgeServer({
+        onQuestion: (questions, signal) => hooks.question(questions, signal),
+        onPlan: (sessionId, active) => hooks.plan(sessionId, active),
+      })
+      try {
+        await server.listen()
+      } catch {
+        server = undefined
+      }
+    } else {
+      process.stderr.write(
+        `deepcode: could not prepare the "${PROFILE_NAME}" dsh profile; agent questions and plan mode are off.\n${setupLog.slice(-5).join('\n')}\n`,
+      )
+    }
   }
   const client = new DshAcpClient({
     cwd,
     sandbox: args.sandbox,
-    onPermission: (request) => bridge.permission(request),
+    profile: server === undefined ? undefined : PROFILE_NAME,
+    env: server === undefined ? undefined : { DEEPCODE_BRIDGE: server.path },
+    onPermission: (request) => hooks.permission(request),
   })
 
   let exiting = false
@@ -457,6 +647,7 @@ async function main(): Promise<void> {
     if (exiting) return
     exiting = true
     client.close()
+    server?.close()
     // Let Ink flush the last frame, then leave even if streams are still open.
     setTimeout(() => {
       app.unmount()
@@ -467,7 +658,8 @@ async function main(): Promise<void> {
   const app = render(
     <Root
       client={client}
-      bridge={bridge}
+      hooks={hooks}
+      server={server}
       args={args}
       initialConfig={config}
       cwd={cwd}

@@ -133,6 +133,10 @@ export interface DshAcpClientOptions {
   cwd: string
   dshPath?: string
   sandbox?: SandboxMode
+  /** dsh profile serving ACP; default is the stock `acp` profile. */
+  profile?: string | undefined
+  /** Extra environment for the dsh process. */
+  env?: Record<string, string> | undefined
   onPermission: (request: RequestPermissionRequest) => Promise<RequestPermissionResponse>
   onLog?: (line: string) => void
 }
@@ -166,13 +170,18 @@ export class DshAcpClient {
   async start(): Promise<void> {
     const dshPath = this.options.dshPath ?? defaultDshPath()
     assertDshExists(dshPath)
-    const { command, args, verbatim } = dshCommand(dshPath)
+    const profile = this.options.profile
+    const { command, args, verbatim } = dshCommand(
+      dshPath,
+      process.platform,
+      profile === undefined ? 'acp' : `--profile ${profile}`,
+    )
     const child = spawn(command, args, {
       cwd: this.options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsVerbatimArguments: verbatim,
       windowsHide: true,
-      env: { ...process.env, DSH_PERMISSION_MODE: this.sandbox },
+      env: { ...process.env, ...this.options.env, DSH_PERMISSION_MODE: this.sandbox },
     })
     this.child = child
     const log = this.options.onLog ?? (() => {})

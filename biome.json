@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**", "build.mjs", "*.json", "*.yml"]
+    "includes": ["src/**", "bridge/**", "build.mjs", "*.json", "*.yml"]
   },
   "formatter": {
     "enabled": true,

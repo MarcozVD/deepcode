@@ -21,6 +21,7 @@ import {
   wordRight,
 } from './editor.js'
 import { Markdown } from './markdown.js'
+import { applyMention, currentMention, matchFiles } from './mentions.js'
 import { type Entry, settledCount, type Transcript } from './transcript.js'
 
 export interface PermissionChoice {
@@ -41,6 +42,26 @@ export interface Picker {
   items: PermissionChoice[]
 }
 
+/** One agent question on screen (multi-question requests are asked in turn). */
+export interface PendingQuestion {
+  header: string
+  question: string
+  options: { label: string; description?: string | undefined }[]
+  multiSelect: boolean
+  /** Label of the free-text choice appended after the options. */
+  customLabel: string
+  position: string
+}
+
+/** What the user did with a question. */
+export type QuestionChoice =
+  | { kind: 'selected'; labels: string[] }
+  | { kind: 'custom' }
+  | { kind: 'dismissed' }
+
+/** Agent-facing mode the Shift+Tab cycle moves through. */
+export type Mode = 'normal' | 'plan' | 'auto-reject'
+
 export interface AppProps {
   transcript: Transcript
   running: boolean
@@ -48,12 +69,19 @@ export interface AppProps {
   cwd: string
   sandbox: string
   approval: ApprovalMode
+  /** Whether plan mode is active (agent-side, via the bridge). */
+  planMode?: boolean | undefined
   permission: PendingPermission | undefined
   picker: Picker | undefined
+  question?: PendingQuestion | undefined
+  /** Workspace files for `@` completion. */
+  files?: string[] | undefined
   onSubmit: (text: string) => void
   onCancel: () => void
   onPermission: (choiceId: string | undefined) => void
   onPick: (id: string | undefined) => void
+  onQuestion?: ((choice: QuestionChoice) => void) | undefined
+  /** Shift+Tab: advance the mode cycle. */
   onToggleApproval: () => void
   onExit: () => void
   /** Shown above the input when it collects something other than a prompt. */
@@ -168,6 +196,79 @@ export function PermissionPrompt({
   )
 }
 
+export function QuestionBox({
+  question,
+  selected,
+  checked,
+}: {
+  question: PendingQuestion
+  selected: number
+  checked: ReadonlySet<number>
+}) {
+  const items = [...question.options, { label: question.customLabel, description: undefined }]
+  return (
+    <Box
+      borderStyle="round"
+      borderColor="magenta"
+      flexDirection="column"
+      paddingX={1}
+      marginTop={1}
+    >
+      <Text bold>
+        {question.header !== '' ? `${question.header} ` : ''}
+        <Text color="gray">{question.position}</Text>
+      </Text>
+      <Text>{question.question}</Text>
+      {items.map((item, index) => {
+        const isCustom = index === items.length - 1
+        const box = question.multiSelect && !isCustom ? (checked.has(index) ? '[x] ' : '[ ] ') : ''
+        return (
+          <Text
+            key={item.label}
+            color={index === selected ? 'cyan' : undefined}
+            wrap="truncate-end"
+          >
+            {`${index === selected ? '❯' : ' '} ${index + 1}. ${box}${item.label}`}
+            {item.description ? <Text color="gray">{`  ${item.description}`}</Text> : null}
+          </Text>
+        )
+      })}
+      <Text color="gray">
+        {question.multiSelect
+          ? '↑/↓ move · Space toggle · Enter confirm · Esc dismiss'
+          : '↑/↓ or number to choose · Enter confirm · Esc dismiss'}
+      </Text>
+    </Box>
+  )
+}
+
+const TODO_MARK = { pending: '☐', in_progress: '◐', completed: '☑' } as const
+
+export function TodoList({ todos }: { todos: Transcript['todos'] }) {
+  if (todos.length === 0) return null
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {todos.map((todo, index) => (
+        <Text
+          // biome-ignore lint/suspicious/noArrayIndexKey: todo order is the identity
+          key={index}
+          color={
+            todo.status === 'completed'
+              ? 'gray'
+              : todo.status === 'in_progress'
+                ? 'cyan'
+                : undefined
+          }
+          strikethrough={todo.status === 'completed'}
+          wrap="truncate-end"
+        >
+          {`${TODO_MARK[todo.status]} ${todo.content}`}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 export function PickerBox({ picker, selected }: { picker: Picker; selected: number }) {
   return (
     <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
@@ -185,6 +286,7 @@ export function StatusBar(props: {
   cwd: string
   sandbox: string
   approval: ApprovalMode
+  planMode?: boolean | undefined
   hint: string | undefined
 }) {
   const usage = props.transcript.usage
@@ -199,6 +301,7 @@ export function StatusBar(props: {
   return (
     <Box flexDirection="column">
       <Text color="gray" wrap="truncate-start">
+        {props.planMode ? <Text color="cyan">⏸ plan mode · </Text> : null}
         {parts.join(' · ')}
       </Text>
       {props.hint !== undefined ? <Text color="yellow">{props.hint}</Text> : null}
@@ -232,11 +335,15 @@ function handleSelect(
 }
 
 export function App(props: AppProps) {
-  const { transcript, running, permission, picker } = props
+  const { transcript, running, permission, picker, question } = props
   const [editor, setEditor] = useState<EditorState>(emptyEditor)
   const input = editor.text
   const clearInput = (): void => setEditor(emptyEditor)
   const [selected, setSelected] = useState(0)
+  const [checked, setChecked] = useState<ReadonlySet<number>>(new Set())
+  const mention = props.files === undefined ? undefined : currentMention(editor)
+  const mentionMatches =
+    mention === undefined || props.files === undefined ? [] : matchFiles(props.files, mention.query)
   const [exitArmed, setExitArmed] = useState(false)
   // A ref, not state: two quick Ctrl+C presses can arrive before a re-render.
   const exitArmedRef = useRef(false)
@@ -267,6 +374,41 @@ export function App(props: AppProps) {
       })
       return
     }
+    if (question !== undefined && props.inputLabel === undefined) {
+      const count = question.options.length + 1
+      const customIndex = count - 1
+      const finish = (choice: QuestionChoice): void => {
+        setSelected(0)
+        setChecked(new Set())
+        props.onQuestion?.(choice)
+      }
+      const choose = (index: number): void => {
+        if (index === customIndex) finish({ kind: 'custom' })
+        else if (question.multiSelect) {
+          const picked = checked.size > 0 ? [...checked] : [index]
+          const labels = picked
+            .sort((a, b) => a - b)
+            .map((position) => question.options[position]?.label ?? '')
+          finish({ kind: 'selected', labels })
+        } else finish({ kind: 'selected', labels: [question.options[index]?.label ?? ''] })
+      }
+      if (key.escape) finish({ kind: 'dismissed' })
+      else if (key.upArrow) setSelected((index) => (index + count - 1) % count)
+      else if (key.downArrow) setSelected((index) => (index + 1) % count)
+      else if (char === ' ' && question.multiSelect && selected !== customIndex) {
+        setChecked((current) => {
+          const next = new Set(current)
+          if (next.has(selected)) next.delete(selected)
+          else next.add(selected)
+          return next
+        })
+      } else if (key.return) choose(selected)
+      else if (/^[1-9]$/.test(char) && Number(char) <= count) {
+        if (question.multiSelect && Number(char) - 1 !== customIndex) setSelected(Number(char) - 1)
+        else choose(Number(char) - 1)
+      }
+      return
+    }
     if (picker !== undefined) {
       handleSelect(char, key, picker.items, selected, setSelected, (id) => {
         setSelected(0)
@@ -277,6 +419,11 @@ export function App(props: AppProps) {
 
     if (key.tab && key.shift) {
       props.onToggleApproval()
+      return
+    }
+    if (key.tab && mentionMatches.length > 0) {
+      const file = mentionMatches[0]
+      if (file !== undefined) setEditor((state) => applyMention(state, file))
       return
     }
     const collecting = props.inputLabel !== undefined
@@ -397,15 +544,19 @@ export function App(props: AppProps) {
       {live.map((entry) => (
         <EntryView key={entry.id} entry={entry} maxLines={liveLines} />
       ))}
-      {running && permission === undefined ? (
+      <TodoList todos={transcript.todos} />
+      {running && permission === undefined && question === undefined ? (
         <Box marginTop={1}>
           <Text color="cyan">✻ Working…</Text>
         </Box>
       ) : null}
+      {question !== undefined && permission === undefined ? (
+        <QuestionBox question={question} selected={selected} checked={checked} />
+      ) : null}
       {permission !== undefined ? (
         <PermissionPrompt permission={permission} selected={selected} />
       ) : null}
-      {picker !== undefined && permission === undefined ? (
+      {picker !== undefined && permission === undefined && question === undefined ? (
         <PickerBox picker={picker} selected={selected} />
       ) : null}
       {props.inputLabel !== undefined ? (
@@ -431,12 +582,18 @@ export function App(props: AppProps) {
           {`  /${command.name.padEnd(8)} ${command.description}`}
         </Text>
       ))}
+      {mentionMatches.map((file, index) => (
+        <Text key={file} color={index === 0 ? 'cyan' : 'gray'} wrap="truncate-start">
+          {`  @${file}${index === 0 ? '  (Tab)' : ''}`}
+        </Text>
+      ))}
       <StatusBar
         model={props.model}
         transcript={transcript}
         cwd={props.cwd}
         sandbox={props.sandbox}
         approval={props.approval}
+        planMode={props.planMode}
         hint={hint}
       />
     </Box>

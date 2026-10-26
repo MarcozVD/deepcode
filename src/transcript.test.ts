@@ -8,6 +8,7 @@ import {
   settledCount,
   summarizeInput,
   summarizeOutput,
+  withTodos,
 } from './transcript.js'
 
 describe('applyUpdate', () => {
@@ -119,6 +120,29 @@ describe('previewDiff', () => {
       { sign: '+', text: 'y' },
     ])
     expect(previewDiff({ command: 'ls' }, undefined)).toEqual([])
+  })
+})
+
+describe('todos', () => {
+  it('mirrors todo_write input into the task list and ignores bad items', () => {
+    const state = applyUpdate(emptyTranscript, {
+      sessionUpdate: 'tool_call',
+      toolCallId: 't1',
+      title: 'todo_write',
+      status: 'completed',
+      rawInput: {
+        todos: [
+          { content: 'Read', status: 'completed' },
+          { content: 'Fix', status: 'in_progress' },
+          { content: 'Bad', status: 'later' },
+        ],
+      },
+    })
+    expect(state.todos).toEqual([
+      { content: 'Read', status: 'completed' },
+      { content: 'Fix', status: 'in_progress' },
+    ])
+    expect(withTodos(state, 'read', { todos: [] }).todos).toHaveLength(2)
   })
 })
 

@@ -10,6 +10,8 @@ export const argsSchema = z.object({
   version: z.boolean(),
   sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']),
   approval: z.enum(['ask', 'auto-reject']),
+  /** Use the stock `dsh acp` profile: no agent questions or plan mode. */
+  noBridge: z.boolean(),
   /** `undefined`: fresh session; `''`: pick from a list; otherwise a session id. */
   resume: z.string().optional(),
 })
@@ -22,6 +24,7 @@ export function parseArgs(argv: readonly string[]): Args {
   let version = false
   let sandbox: SandboxMode = 'workspace-write'
   let approval: ApprovalMode = 'ask'
+  let noBridge = false
   let resume: string | undefined
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] ?? ''
@@ -30,6 +33,7 @@ export function parseArgs(argv: readonly string[]): Args {
     else if (argument === '--careful') sandbox = 'read-only'
     else if (argument === '--dangerously-full-access') sandbox = 'danger-full-access'
     else if (argument === '--yolo') approval = 'auto-reject'
+    else if (argument === '--no-bridge') noBridge = true
     else if (argument === '--resume' || argument === '-r') {
       const value = argv[index + 1]
       if (value !== undefined && !value.startsWith('-')) {
@@ -41,7 +45,7 @@ export function parseArgs(argv: readonly string[]): Args {
     } else if (argument.startsWith('--resume=')) resume = argument.slice('--resume='.length)
     else throw new ArgsError(`unknown option: ${argument}`)
   }
-  return argsSchema.parse({ help, version, sandbox, approval, resume }) as Args
+  return argsSchema.parse({ help, version, sandbox, approval, noBridge, resume }) as Args
 }
 
 export const HELP = `deepcode — terminal UI for DeepSeek Harness
@@ -54,10 +58,12 @@ Options:
       --yolo                  Never ask: sandbox escalations are rejected automatically
       --dangerously-full-access
                               No sandbox (dsh danger-full-access)
+      --no-bridge             Plain \`dsh acp\`: no agent questions or plan mode
   -h, --help                  Show this help
   -v, --version               Show version
 
-In the prompt: /help lists commands, Shift+Tab toggles ask / auto-reject.
+In the prompt: /help lists commands, @ mentions files, Shift+Tab cycles
+normal → plan mode → auto-reject.
 
 Environment:
   DEEPCODE_DSH                Path to dsh.cmd
